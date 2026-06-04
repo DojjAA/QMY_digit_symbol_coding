@@ -839,7 +839,7 @@ def show_menu() -> int:
                      facecolor="#4CAF50", edgecolor="#2E7D32",
                      linewidth=2, joinstyle="round")
     ax.add_patch(btn1)
-    ax.text(2.5, 2.15, "1   📷  Camera",
+    ax.text(2.5, 2.15, "1 - Camera",
             ha="center", va="center", fontsize=12,
             fontweight="bold", color="white")
 
@@ -848,7 +848,7 @@ def show_menu() -> int:
                      facecolor="#2196F3", edgecolor="#1565C0",
                      linewidth=2, joinstyle="round")
     ax.add_patch(btn2)
-    ax.text(2.5, 0.85, "2   🗂️  Select File",
+    ax.text(2.5, 0.85, "2 - Select File",
             ha="center", va="center", fontsize=12,
             fontweight="bold", color="white")
 
