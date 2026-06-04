@@ -5,23 +5,26 @@ Usage:
     Double-click the script, or run:
         python wais_digit_grouping.py [image_path]
 
-    If no path is given, a file-open dialog appears.
+    If no path is given, a menu pops up:
+      1 → Camera (live preview, press any key to capture)
+      2 → Select file via dialog
 
 Workflow:
-  1. Open image (dialog or CLI arg) → display in popup
-  2. User clicks 4 corners of the entry grid (TL→TR→BR→BL)
-     Right-click to undo the last corner click.
+  1. Menu → choose input source
+  2. Image appears → click 4 corners of the entry grid (TL→TR→BR→BL)
+     Right-click to undo.  Then 9 draggable control points appear;
+     drag to warp, press Enter/Space to confirm (homography optimised).
   3. Perspective‑correct the grid region
-  4. Divide corrected grid into 7×20 cell_groups using the
-     known digit layout (hardcoded from the WAIS key).
-     Each cell is enlarged by 10 % on each side for overlap.
+  4. Divide corrected grid into 7×20 cell_groups (first 7 = samples skipped)
+     using the known digit layout.  Each cell is enlarged by 15 %.
      Extract the symbol region below the digit.
   5. Interactive review popup:
      • Left‑click a cell → select (green highlight)
      • Right‑click a cell → deselect
      • Drag to select multiple cells at once
      • Selected‑cell counter at bottom
-  6. Press Q / Enter / close popup → quit
+  6. Enter/Space → continue with next image (same input mode)
+     Q / Esc / close → quit entirely
 
 Dependencies: opencv-python, numpy, matplotlib
 """
@@ -322,14 +325,14 @@ def select_four_corners(img: np.ndarray, filename: str
             drag_idx = None
 
     def on_key(event):
-        if event.key in ("enter",):
+        if event.key in ("enter", "space"):
             if ctrl is not None:
                 plt.close(fig)
         elif event.key in ("escape", "q", "Q"):
-            plt.close(fig)
+            sys.exit(0)
 
     def on_close(_event):
-        pass
+        sys.exit(0)
 
     fig.canvas.mpl_connect("button_press_event", on_press)
     fig.canvas.mpl_connect("motion_notify_event", on_motion)
@@ -685,11 +688,13 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
         _blit()
 
     def on_key(event: KeyEvent) -> None:
-        if event.key in ("q", "Q", "enter", "escape"):
-            plt.close(fig)
+        if event.key in ("enter", "space"):
+            plt.close(fig)  # return to caller → continue
+        elif event.key in ("q", "Q", "escape"):
+            sys.exit(0)      # quit entirely
 
     def on_close(_event: CloseEvent) -> None:
-        pass
+        sys.exit(0)
 
     def on_resize(_event) -> None:
         """Re‑render everything cleanly when the window is resized."""
@@ -719,7 +724,8 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     _blit()  # render the initial text on screen
 
     plt.show()
-    sys.exit(0)
+    # If we get here, Enter/Space was pressed → return to caller for re-loop
+    return
 
 
 # ══════════════════════════════════════════════════════════════
@@ -749,18 +755,15 @@ def _capture_from_camera() -> tuple[np.ndarray, str]:
     """
     Open the default camera, show live preview in an OpenCV window.
     Press **any key** to capture the current frame and proceed.
+    ESC quits entirely.
 
     Returns (image, label) where label is a short descriptive name.
     """
-    print("       Opening camera (press any key to capture, ESC to cancel) …")
+    print("       Opening camera (press any key to capture, ESC to quit) …")
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("       ERROR: Could not open camera.  Falling back to file dialog.")
-        path = _pick_image_via_dialog()
-        if not path:
-            print("       No file selected.  Exiting.")
-            sys.exit(1)
-        return load_image(path), os.path.basename(path)
+        print("       ERROR: Could not open camera.  Exiting.")
+        sys.exit(1)
 
     # Allow a moment for the camera to warm up
     for _ in range(10):
@@ -771,14 +774,10 @@ def _capture_from_camera() -> tuple[np.ndarray, str]:
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("       Camera read failed.  Falling back to file dialog.")
+            print("       Camera read failed.  Exiting.")
             cap.release()
             cv2.destroyAllWindows()
-            path = _pick_image_via_dialog()
-            if not path:
-                print("       No file selected.  Exiting.")
-                sys.exit(1)
-            return load_image(path), os.path.basename(path)
+            sys.exit(1)
 
         # Mirror horizontally for intuitive left-right movement
         display = cv2.flip(frame, 1)
@@ -786,7 +785,7 @@ def _capture_from_camera() -> tuple[np.ndarray, str]:
         # Overlay instruction text
         cv2.putText(display, "Position the WAIS form, then press ANY KEY to capture",
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(display, "ESC to cancel",
+        cv2.putText(display, "ESC to quit",
                     (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
 
         cv2.imshow("WAIS Camera Capture", display)
@@ -796,11 +795,7 @@ def _capture_from_camera() -> tuple[np.ndarray, str]:
             print("       Capture cancelled by user.")
             cap.release()
             cv2.destroyAllWindows()
-            path = _pick_image_via_dialog()
-            if not path:
-                print("       No file selected.  Exiting.")
-                sys.exit(1)
-            return load_image(path), os.path.basename(path)
+            sys.exit(0)
 
         if key != 255:  # any key pressed (not a timeout)
             # Capture without the mirror & overlay
@@ -815,28 +810,97 @@ def _capture_from_camera() -> tuple[np.ndarray, str]:
     return captured, label
 
 
-def main() -> None:
-    if len(sys.argv) >= 2:
-        input_path = sys.argv[1]
-        img = load_image(input_path)
-        filename = os.path.basename(input_path)
-        print(f"\n{'=' * 60}")
-        print("WAIS Digit Symbol Coding — Grouping Tool")
-        print(f"{'=' * 60}")
-        print(f"Input: {input_path}")
-    else:
-        print(f"\n{'=' * 60}")
-        print("WAIS Digit Symbol Coding — Grouping Tool")
-        print(f"{'=' * 60}")
-        print("No image given — opening camera …")
-        img, filename = _capture_from_camera()
-        print(f"Input: camera capture ({filename})")
+def show_menu() -> int:
+    """
+    Show a menu popup with two wide rectangular buttons:
+      1 → Camera
+      2 → Select File
 
+    Press 1/2 or click the button.  Q/Esc/X → quit.
+    Returns the choice (1 or 2).
+    """
+    fig, ax = plt.subplots(figsize=(5, 3.2))
+    # Hide toolbar
+    try:
+        fig.canvas.toolbar_visible = False
+    except AttributeError:
+        try:
+            fig.canvas.toolbar.visible = False
+        except AttributeError:
+            pass
+
+    ax.set_xlim(0, 5)
+    ax.set_ylim(0, 3.2)
+    ax.axis("off")
+    ax.set_title("WAIS Digit Symbol Coding", fontsize=13, fontweight="bold", pad=12)
+
+    # ── Button 1: Camera ─────────────────────────────────
+    btn1 = Rectangle((0.5, 1.7), 4, 0.9,
+                     facecolor="#4CAF50", edgecolor="#2E7D32",
+                     linewidth=2, joinstyle="round")
+    ax.add_patch(btn1)
+    ax.text(2.5, 2.15, "1   📷  Camera",
+            ha="center", va="center", fontsize=12,
+            fontweight="bold", color="white")
+
+    # ── Button 2: Select File ────────────────────────────
+    btn2 = Rectangle((0.5, 0.4), 4, 0.9,
+                     facecolor="#2196F3", edgecolor="#1565C0",
+                     linewidth=2, joinstyle="round")
+    ax.add_patch(btn2)
+    ax.text(2.5, 0.85, "2   🗂️  Select File",
+            ha="center", va="center", fontsize=12,
+            fontweight="bold", color="white")
+
+    choice: list[int] = []
+
+    def _close(val: int) -> None:
+        choice.append(val)
+        plt.close(fig)
+
+    def on_click(event):
+        if event.xdata is None or event.ydata is None:
+            return
+        x, y = event.xdata, event.ydata
+        if 0.5 <= x <= 4.5:
+            if 1.7 <= y <= 2.6:
+                _close(1)
+            elif 0.4 <= y <= 1.3:
+                _close(2)
+
+    def on_key(event):
+        if event.key == "1":
+            _close(1)
+        elif event.key == "2":
+            _close(2)
+        elif event.key in ("q", "Q", "escape"):
+            sys.exit(0)
+
+    def on_close(_event):
+        sys.exit(0)
+
+    fig.canvas.mpl_connect("button_press_event", on_click)
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    fig.canvas.mpl_connect("close_event", on_close)
+
+    plt.tight_layout()
+    plt.show()
+
+    if not choice:
+        sys.exit(0)
+    return choice[0]
+
+
+def _run_pipeline(img: np.ndarray, filename: str) -> None:
+    """Run the full pipeline on one image.
+    Returns normally → Enter/Space was pressed (caller should re-loop).
+    Never returns on Q/Esc/X (calls sys.exit in popups).
+    """
     # ── 1. Load & corners ───────────────────────────────
     print("\n[1/4] Loading input image …")
     print("       Stage 1 — Click 4 grid corners (right-click to undo).")
     print("       Stage 2 — Drag any of the 9 control points to warp.")
-    print("                 Press Enter to confirm and optimise.")
+    print("                 Press Enter/Space to confirm and optimise.")
     corners = select_four_corners(img, filename)
 
     # ── 2. Perspective correction ───────────────────────
@@ -856,8 +920,45 @@ def main() -> None:
 
     # ── 4. Show review popup ────────────────────────────
     print("\n[4/4] Displaying review popup …")
-    print("       Press Q or Enter to quit.  Close window also quits.")
+    print("       Enter/Space → continue with next  |  Q/Esc → quit")
     show_review_popup(results, filename)
+
+
+def main() -> None:
+    print(f"\n{'=' * 60}")
+    print("WAIS Digit Symbol Coding — Grouping Tool")
+    print(f"{'=' * 60}")
+
+    if len(sys.argv) >= 2:
+        # CLI arg: process once and exit
+        input_path = sys.argv[1]
+        img = load_image(input_path)
+        filename = os.path.basename(input_path)
+        print(f"Input: {input_path}")
+        _run_pipeline(img, filename)
+        return
+
+    # No CLI arg: show menu and loop
+    while True:
+        menu_choice = show_menu()
+        print(f"       You chose: {'Camera' if menu_choice == 1 else 'Select File'}")
+
+        if menu_choice == 1:
+            img, filename = _capture_from_camera()
+            print(f"Input: camera capture ({filename})")
+        else:
+            input_path = _pick_image_via_dialog()
+            if not input_path:
+                print("       No file selected.  Returning to menu.")
+                continue
+            img = load_image(input_path)
+            filename = os.path.basename(input_path)
+            print(f"Input: {input_path}")
+
+        _run_pipeline(img, filename)
+        # If we get here, user pressed Enter/Space in review popup → loop
+        print("       Continuing (Enter/Space).  Close or press Q/Esc to quit.")
+        # Final review popup returns → loop back with same menu choice
 
 
 if __name__ == "__main__":
