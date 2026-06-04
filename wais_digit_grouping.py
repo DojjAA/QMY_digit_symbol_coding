@@ -314,7 +314,6 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     """
     canvas, rects, digits_cell, _indices = _build_review_canvas(results, filename)
     n_cells = len(rects)
-    selected = [False] * n_cells
 
     fig, ax = plt.subplots(figsize=(14, 9.5))
     ax.imshow(canvas, cmap="gray", vmin=0, vmax=255)
@@ -326,7 +325,8 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     ax.axis("off")
 
     # ── Selection highlight patches ──────────────────────
-    sel_patches: list[Rectangle] = []
+    # Maps cell_index → Rectangle patch for O(1) lookup
+    sel_patches: dict[int, Rectangle] = {}
 
     # Counter text (bottom)
     counter_text = ax.text(
@@ -336,26 +336,31 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     )
 
     # ── Rubber‑band drag rectangle ───────────────────────
-    drag_rect: Rectangle | None = None
+    drag_rect_patch: Rectangle | None = None
     drag_origin: tuple[float, float] | None = None
 
     # ── Helpers ──────────────────────────────────────────
 
-    def _refresh_highlights() -> None:
-        """Remove all selection patches and redraw from ``selected`` state."""
-        for p in sel_patches:
-            p.remove()
-        sel_patches.clear()
-        for i, s in enumerate(selected):
-            if not s:
-                continue
-            x, y, w, h = rects[i]
-            patch = Rectangle((x, y), w, h,
-                              linewidth=0, facecolor="lime", alpha=0.25,
-                              edgecolor=None)
-            ax.add_patch(patch)
-            sel_patches.append(patch)
-        counter_text.set_text(f"Selected: {sum(selected)} / {n_cells}")
+    def _select(idx: int) -> None:
+        """Select a single cell (do nothing if already selected)."""
+        if idx in sel_patches:
+            return
+        x, y, w, h = rects[idx]
+        patch = Rectangle((x, y), w, h,
+                          linewidth=0, facecolor="lime", alpha=0.25,
+                          edgecolor=None)
+        ax.add_patch(patch)
+        sel_patches[idx] = patch
+
+    def _deselect(idx: int) -> None:
+        """Deselect a single cell (do nothing if not selected)."""
+        patch = sel_patches.pop(idx, None)
+        if patch is None:
+            return
+        patch.remove()
+
+    def _update_counter() -> None:
+        counter_text.set_text(f"Selected: {len(sel_patches)} / {n_cells}")
         fig.canvas.draw_idle()
 
     def _cell_at(x: float, y: float) -> int | None:
@@ -370,87 +375,81 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
         """Return indices of all cells whose centre lies in the rect."""
         x_lo, x_hi = min(x1, x2), max(x1, x2)
         y_lo, y_hi = min(y1, y2), max(y1, y2)
-        hits = []
-        for i, (cx, cy, cw, ch) in enumerate(rects):
-            cx_c = cx + cw / 2
-            cy_c = cy + ch / 2
-            if x_lo <= cx_c <= x_hi and y_lo <= cy_c <= y_hi:
-                hits.append(i)
-        return hits
-
-    def _clear_drag_rect() -> None:
-        nonlocal drag_rect, drag_origin
-        if drag_rect is not None:
-            drag_rect.remove()
-            drag_rect = None
-        drag_origin = None
+        return [i for i, (cx, cy, cw, ch) in enumerate(rects)
+                if x_lo <= cx + cw / 2 <= x_hi and
+                   y_lo <= cy + ch / 2 <= y_hi]
 
     # ── Event handlers ───────────────────────────────────
 
     def on_press(event: MouseEvent) -> None:
+        nonlocal drag_origin
         if event.inaxes != ax or event.xdata is None or event.ydata is None:
             return
 
-        # Left button → start drag or single select
         if event.button == 1:
+            # Left button → start drag
             drag_origin = (event.xdata, event.ydata)
-            # Single click (no drag yet)
-            idx = _cell_at(event.xdata, event.ydata)
-            if idx is not None:
-                selected[idx] = True
-                _refresh_highlights()
 
-        # Right button → deselect
         elif event.button == 3:
+            # Right button → deselect single cell
             idx = _cell_at(event.xdata, event.ydata)
             if idx is not None:
-                selected[idx] = False
-                _refresh_highlights()
+                _deselect(idx)
+                _update_counter()
 
     def on_motion(event: MouseEvent) -> None:
-        nonlocal drag_rect
+        nonlocal drag_rect_patch
         if event.inaxes != ax or drag_origin is None:
             return
         if event.xdata is None or event.ydata is None:
             return
 
-        _clear_drag_rect()
+        # Remove previous rubber-band rect (but KEEP drag_origin)
+        if drag_rect_patch is not None:
+            drag_rect_patch.remove()
+            drag_rect_patch = None
 
         x0, y0 = drag_origin
         x1, y1 = event.xdata, event.ydata
-
         x_lo, x_hi = min(x0, x1), max(x0, x1)
         y_lo, y_hi = min(y0, y1), max(y0, y1)
 
-        drag_rect = Rectangle(
+        drag_rect_patch = Rectangle(
             (x_lo, y_lo), x_hi - x_lo, y_hi - y_lo,
-            linewidth=1.5, edgecolor="cyan", facecolor="cyan", alpha=0.12,
-            linestyle="--",
+            linewidth=1.5, edgecolor="cyan", facecolor="cyan",
+            alpha=0.12, linestyle="--",
         )
-        ax.add_patch(drag_rect)
+        ax.add_patch(drag_rect_patch)
         fig.canvas.draw_idle()
 
     def on_release(event: MouseEvent) -> None:
-        nonlocal drag_origin
+        nonlocal drag_origin, drag_rect_patch
         if event.button != 1 or drag_origin is None:
-            return
-        if event.xdata is None or event.ydata is None:
-            _clear_drag_rect()
             return
 
         x0, y0 = drag_origin
-        x1, y1 = event.xdata, event.ydata
+        x1, y1 = (event.xdata, event.ydata) if (
+            event.xdata is not None and event.ydata is not None
+        ) else (x0, y0)
 
-        # Only treat as drag if moved > 5 px (otherwise it's a single click)
+        # Clear rubber-band
+        if drag_rect_patch is not None:
+            drag_rect_patch.remove()
+            drag_rect_patch = None
+        drag_origin = None
+
         dist = np.hypot(x1 - x0, y1 - y0)
         if dist > 5:
-            hits = _cells_in_rect(x0, y0, x1, y1)
-            for idx in hits:
-                selected[idx] = True
-            _refresh_highlights()
-
-        _clear_drag_rect()
-        drag_origin = None
+            # Drag → select all cells inside rect
+            for idx in _cells_in_rect(x0, y0, x1, y1):
+                _select(idx)
+            _update_counter()
+        else:
+            # Single click → select one cell
+            idx = _cell_at(x1, y1)
+            if idx is not None:
+                _select(idx)
+                _update_counter()
 
     def on_key(event: KeyEvent) -> None:
         if event.key in ("q", "Q", "enter", "escape"):
