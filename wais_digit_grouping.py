@@ -44,6 +44,17 @@ import matplotlib.pyplot as plt
 from matplotlib.backend_bases import KeyEvent, CloseEvent, MouseEvent
 from matplotlib.patches import Rectangle
 
+
+def _hide_toolbar(fig) -> None:
+    """Hide the matplotlib navigation toolbar on TkAgg backend."""
+    try:
+        fig.canvas.manager.toolbar.pack_forget()
+    except Exception:
+        try:
+            fig.canvas.manager.toolbar.visible = False
+        except Exception:
+            pass
+
 # ══════════════════════════════════════════════════════════════
 # CONSTANTS
 # ══════════════════════════════════════════════════════════════
@@ -140,8 +151,8 @@ def select_four_corners(img: np.ndarray, filename: str
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     h_img, w_img = img.shape[:2]
 
-    with plt.rc_context({'toolbar': 'None'}):
-        fig, ax = plt.subplots(figsize=(12, 16))
+    fig, ax = plt.subplots(figsize=(12, 16))
+    _hide_toolbar(fig)
     ax.imshow(img_rgb)
     ax.axis("on")
 
@@ -514,8 +525,8 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     canvas, rects, _digits, _indices = _build_review_canvas(results, filename)
     n_cells = len(rects)
 
-    with plt.rc_context({'toolbar': 'None'}):
-        fig, ax = plt.subplots(figsize=(14, 9.5))
+    fig, ax = plt.subplots(figsize=(14, 9.5))
+    _hide_toolbar(fig)
 
     ax.imshow(canvas, cmap="gray", vmin=0, vmax=255,
               interpolation="nearest")
@@ -806,71 +817,76 @@ def _capture_from_camera() -> tuple[np.ndarray, str]:
 
 def show_menu() -> int:
     """
-    Show a menu popup with two wide rectangular buttons:
-      1 → Camera
-      2 → Select File
+    Show a menu window with two wide rectangular buttons using tkinter.
+      Button 1 → Camera
+      Button 2 → Select File
+    Q / Esc → quit.
 
-    Press 1/2 or click the button.  Q/Esc/X → quit.
     Returns the choice (1 or 2).
     """
-    with plt.rc_context({'toolbar': 'None'}):
-        fig, ax = plt.subplots(figsize=(5, 3.2))
+    import tkinter as tk
+    from tkinter import font as tkfont
 
-    ax.set_xlim(0, 5)
-    ax.set_ylim(0, 3.2)
-    ax.axis("off")
-    ax.set_title("WAIS Digit Symbol Coding", fontsize=13, fontweight="bold", pad=12)
+    root = tk.Tk()
+    root.title("WAIS Digit Symbol Coding")
+    root.configure(bg="#f0f0f0")
+    root.resizable(False, False)
+    root.protocol("WM_DELETE_WINDOW", sys.exit)
 
-    # ── Button 1: Camera ─────────────────────────────────
-    btn1 = Rectangle((0.5, 1.7), 4, 0.9,
-                     facecolor="#4CAF50", edgecolor="#2E7D32",
-                     linewidth=2, joinstyle="round")
-    ax.add_patch(btn1)
-    ax.text(2.5, 2.15, "1 - Camera",
-            ha="center", va="center", fontsize=12,
-            fontweight="bold", color="white")
+    # Center the window
+    win_w, win_h = 380, 260
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    x = (sw - win_w) // 2
+    y = (sh - win_h) // 2
+    root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
-    # ── Button 2: Select File ────────────────────────────
-    btn2 = Rectangle((0.5, 0.4), 4, 0.9,
-                     facecolor="#2196F3", edgecolor="#1565C0",
-                     linewidth=2, joinstyle="round")
-    ax.add_patch(btn2)
-    ax.text(2.5, 0.85, "2 - Select File",
-            ha="center", va="center", fontsize=12,
-            fontweight="bold", color="white")
+    # Bind keys
+    def _on_key(event):
+        if event.keysym == "1":
+            _choose(1)
+        elif event.keysym == "2":
+            _choose(2)
+        elif event.keysym in ("q", "Q", "Escape"):
+            sys.exit(0)
+
+    root.bind("<Key>", _on_key)
 
     choice: list[int] = []
 
-    def _close(val: int) -> None:
+    def _choose(val: int) -> None:
         choice.append(val)
-        plt.close(fig)
+        root.destroy()
+        root.quit()
 
-    def on_click(event):
-        if event.xdata is None or event.ydata is None:
-            return
-        x, y = event.xdata, event.ydata
-        if 0.5 <= x <= 4.5:
-            if 1.7 <= y <= 2.6:
-                _close(1)
-            elif 0.4 <= y <= 1.3:
-                _close(2)
+    # Title
+    title_font = tkfont.Font(family="Helvetica", size=14, weight="bold")
+    tk.Label(root, text="WAIS Digit Symbol Coding", font=title_font,
+             bg="#f0f0f0", fg="#333").pack(pady=(20, 18))
 
-    def on_key(event):
-        if event.key == "1":
-            _close(1)
-        elif event.key == "2":
-            _close(2)
-        elif event.key in ("q", "Q", "escape"):
-            sys.exit(0)
+    # Button 1: Camera
+    btn1 = tk.Button(
+        root, text="1    Camera", font=("Helvetica", 12, "bold"),
+        bg="#4CAF50", fg="white", activebackground="#388E3C",
+        activeforeground="white", relief="raised", bd=3,
+        cursor="hand2", width=30, height=2, command=lambda: _choose(1),
+    )
+    btn1.pack(pady=(0, 10))
 
-    def on_close(_event):
-        sys.exit(0)
+    # Button 2: Select File
+    btn2 = tk.Button(
+        root, text="2    Select File", font=("Helvetica", 12, "bold"),
+        bg="#2196F3", fg="white", activebackground="#1976D2",
+        activeforeground="white", relief="raised", bd=3,
+        cursor="hand2", width=30, height=2, command=lambda: _choose(2),
+    )
+    btn2.pack(pady=(0, 10))
 
-    fig.canvas.mpl_connect("button_press_event", on_click)
-    fig.canvas.mpl_connect("key_press_event", on_key)
-    fig.canvas.mpl_connect("close_event", on_close)
+    # Focus so keyboard works
+    root.focus_set()
+    btn1.focus_set()
 
-    plt.show()
+    root.mainloop()
 
     if not choice:
         sys.exit(0)
