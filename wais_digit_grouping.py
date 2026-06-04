@@ -192,6 +192,12 @@ def select_four_corners(img: np.ndarray, filename: str
                                edgecolor="yellow", linewidth=2, linestyle="--")
             ax.add_patch(poly)
             artists.append(poly)
+            ax.set_title(
+                "All 4 corners placed — press Enter to confirm, "
+                "or drag the 9 control points to fine‑tune\n"
+                f"File: {filename}",
+                fontsize=11, fontweight="bold",
+            )
         fig.canvas.draw()
 
     def _make_ctrl() -> list[tuple[float, float]]:
@@ -323,7 +329,7 @@ def select_four_corners(img: np.ndarray, filename: str
 
     def on_key(event):
         if event.key in ("enter",):
-            if ctrl is not None:
+            if len(corners) == 4:
                 plt.close(fig)
         elif event.key in ("escape", "q", "Q"):
             plt.close(fig)
@@ -343,7 +349,7 @@ def select_four_corners(img: np.ndarray, filename: str
         print("       Optimising corners from 3×3 control grid …")
         return _optimize_corners_from_3x3(ctrl)
     elif len(corners) == 4:
-        # User pressed Escape before dragging — use raw corners
+        # User pressed Enter in stage 1, or pressed Escape — use raw corners
         return corners
     else:
         print("ERROR: You must click exactly 4 corners.")
@@ -497,7 +503,7 @@ def _build_review_canvas(
 
 
 def show_review_popup(results: dict[int, list[np.ndarray]],
-                      filename: str) -> None:
+                      filename: str) -> bool:
     """
     Interactive review popup with selection (blitting‑accelerated).
 
@@ -505,7 +511,8 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     • Right‑click a cell →  deselect
     • Drag               →  select all cells inside the drag rectangle
     • Counter at bottom shows how many cells are selected
-    • Q / Enter / close  →  quit
+    • Enter              →  close & continue to next image (returns True)
+    • Q / Escape / close →  quit (returns False)
     """
     canvas, rects, _digits, _indices = _build_review_canvas(results, filename)
     n_cells = len(rects)
@@ -524,7 +531,8 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
               interpolation="nearest")
     ax.set_title(
         "WAIS Digit Symbol Coding — Select cells  "
-        "(Left=select  Right=deselect  Drag=box  Q=quit)",
+        "(Left=select  Right=deselect  Drag=box  "
+        "Enter=next image  Q=quit)",
         fontsize=11, fontweight="bold",
     )
     ax.axis("off")
@@ -551,6 +559,7 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     drag_origin: tuple[float, float] | None = None
     _bg: object | None = None  # saved blit background, refreshed on resize
     _resizing = False  # guard against recursive resize_draw() calls
+    _continue_loop = False  # True if Enter was pressed
 
     # ── Blit helpers ──────────────────────────────────────
 
@@ -685,7 +694,11 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
         _blit()
 
     def on_key(event: KeyEvent) -> None:
-        if event.key in ("q", "Q", "enter", "escape"):
+        nonlocal _continue_loop
+        if event.key in ("enter",):
+            _continue_loop = True
+            plt.close(fig)
+        elif event.key in ("q", "Q", "escape"):
             plt.close(fig)
 
     def on_close(_event: CloseEvent) -> None:
@@ -719,7 +732,7 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     _blit()  # render the initial text on screen
 
     plt.show()
-    sys.exit(0)
+    return _continue_loop
 
 
 # ══════════════════════════════════════════════════════════════
@@ -824,40 +837,66 @@ def main() -> None:
         print("WAIS Digit Symbol Coding — Grouping Tool")
         print(f"{'=' * 60}")
         print(f"Input: {input_path}")
-    else:
-        print(f"\n{'=' * 60}")
-        print("WAIS Digit Symbol Coding — Grouping Tool")
-        print(f"{'=' * 60}")
-        print("No image given — opening camera …")
+        # Single-shot mode: process file once, then quit
+        print("\n[1/4] Loading input image …")
+        print("       Stage 1 — Click 4 grid corners (right-click to undo).")
+        print("       Stage 2 — Drag any of the 9 control points to warp.")
+        print("                 Press Enter to confirm and optimise.")
+        corners = select_four_corners(img, filename)
+        print("\n[2/4] Applying perspective correction …")
+        warped = perspective_correct(img, corners)
+        h_crop, w_crop = warped.shape[:2]
+        print(f"       Corrected grid size: {w_crop}×{h_crop} px")
+        print("\n[3/4] Extracting symbol entries …")
+        results = extract_symbols(warped)
+        total = sum(len(v) for v in results.values())
+        print(f"       Total cell_groups processed: {total} / {GRID_ROWS * GRID_COLS - SAMPLE_COUNT}")
+        for d in range(1, 10):
+            print(f"         Digit {d}: {len(results[d])} entries")
+        print("\n[4/4] Displaying review popup …")
+        print("       Enter=next image  Q=quit  (close window also quits)")
+        show_review_popup(results, filename)
+        return
+
+    # ── Camera loop mode ────────────────────────────────
+    print(f"\n{'=' * 60}")
+    print("WAIS Digit Symbol Coding — Grouping Tool")
+    print(f"{'=' * 60}")
+    print("No image given — looping from camera capture.")
+    print("In the review popup, press Enter to capture the next image")
+    print("or press Q / Escape to quit.\n")
+
+    while True:
         img, filename = _capture_from_camera()
-        print(f"Input: camera capture ({filename})")
+        print(f"\nInput: camera capture ({filename})")
 
-    # ── 1. Load & corners ───────────────────────────────
-    print("\n[1/4] Loading input image …")
-    print("       Stage 1 — Click 4 grid corners (right-click to undo).")
-    print("       Stage 2 — Drag any of the 9 control points to warp.")
-    print("                 Press Enter to confirm and optimise.")
-    corners = select_four_corners(img, filename)
+        # ── 1. Load & corners ───────────────────────────────
+        print("\n[1/4] Loading input image …")
+        print("       Click 4 grid corners (right-click to undo).")
+        print("       Press Enter after placing all 4 corners to confirm.")
+        corners = select_four_corners(img, filename)
 
-    # ── 2. Perspective correction ───────────────────────
-    print("\n[2/4] Applying perspective correction …")
-    warped = perspective_correct(img, corners)
-    h_crop, w_crop = warped.shape[:2]
-    print(f"       Corrected grid size: {w_crop}×{h_crop} px")
+        # ── 2. Perspective correction ───────────────────────
+        print("\n[2/4] Applying perspective correction …")
+        warped = perspective_correct(img, corners)
+        h_crop, w_crop = warped.shape[:2]
+        print(f"       Corrected grid size: {w_crop}×{h_crop} px")
 
-    # ── 3. Extract symbols ──────────────────────────────
-    print("\n[3/4] Extracting symbol entries …")
-    results = extract_symbols(warped)
+        # ── 3. Extract symbols ──────────────────────────────
+        print("\n[3/4] Extracting symbol entries …")
+        results = extract_symbols(warped)
 
-    total = sum(len(v) for v in results.values())
-    print(f"       Total cell_groups processed: {total} / {GRID_ROWS * GRID_COLS - SAMPLE_COUNT}")
-    for d in range(1, 10):
-        print(f"         Digit {d}: {len(results[d])} entries")
+        total = sum(len(v) for v in results.values())
+        print(f"       Total cell_groups processed: {total} / {GRID_ROWS * GRID_COLS - SAMPLE_COUNT}")
+        for d in range(1, 10):
+            print(f"         Digit {d}: {len(results[d])} entries")
 
-    # ── 4. Show review popup ────────────────────────────
-    print("\n[4/4] Displaying review popup …")
-    print("       Press Q or Enter to quit.  Close window also quits.")
-    show_review_popup(results, filename)
+        # ── 4. Show review popup ────────────────────────────
+        print("\n[4/4] Displaying review popup …")
+        print("       Enter=next image  Q=quit  (close window also quits)")
+        should_continue = show_review_popup(results, filename)
+        if not should_continue:
+            break
 
 
 if __name__ == "__main__":
