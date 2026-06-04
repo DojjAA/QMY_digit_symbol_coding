@@ -327,7 +327,7 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
 
     # ── Text elements ─────────────────────────────────────
     counter_text = ax.text(
-        0.5, -0.03, "Selected: 0 / 0",
+        0.5, -0.03, "",
         transform=ax.transAxes, fontsize=12, fontweight="bold",
         ha="center", va="top", color="green",
     )
@@ -454,13 +454,7 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
         if changed:
             counter_text.set_text(
                 f"Selected: {len(sel_patches)} / {n_cells}")
-            _blit()
-        else:
-            # Still remove drag rect visually
-            fig.canvas.restore_region(_bg)  # type: ignore[name-defined]
-            for p in sel_patches.values():
-                ax.draw_artist(p)
-            fig.canvas.blit(fig.bbox)
+        _blit()
 
     def on_key(event: KeyEvent) -> None:
         if event.key in ("q", "Q", "enter", "escape"):
@@ -476,11 +470,15 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     fig.canvas.mpl_connect("key_press_event", on_key)
     fig.canvas.mpl_connect("close_event", on_close)
 
-    # ── Initial full render + save background ────────────
+    # ── Initial full render + save background (WITHOUT text) ──
     plt.tight_layout()
     fig.canvas.draw()
     _bg = fig.canvas.copy_from_bbox(fig.bbox)  # type: ignore[name-defined]
+
+    # Text lives purely as an animated overlay (never baked into _bg)
+    counter_text.set_text(f"Selected: 0 / {n_cells}")
     _ANIMATED_ARTISTS.extend([counter_text])
+    _blit()  # render the initial text on screen
 
     plt.show()
     sys.exit(0)
