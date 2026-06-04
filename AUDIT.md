@@ -61,11 +61,9 @@ Phase 4: Grouped review popup (Q/Enter/close → quit)
 Phase 1: Load image + user clicks 4 grid corners
 Phase 2: Perspective correction
 Phase 3: Smart grid detection + symbol extraction
-  ├── _remove_pen_marks() — inpaint over coloured & thick pen strokes
-  ├── _min_channel_edge() — multi-channel edge fusion
-  ├── _detect_grid_clever() — morphology + projection peak-finding
-  ├── _smart_peaks() — adaptive thresholding with scoring
-  └── _refine_peaks() — local edge snapping
+  ├── _multi_signal_projection() — blackhat + Scharr + dark-pixel fusion
+  ├── _best_regular_grid() — brute-force optimal spacing & offset
+  └── _detect_grid() — orchestrator, falls back to equal division
 Phase 4: Grouped review popup (Q/Enter/close → quit)
 ```
 
@@ -76,10 +74,10 @@ Phase 4: Grouped review popup (Q/Enter/close → quit)
 | **Two scripts** | Smart version handles pen-over-line cases; simple version is always-stable fallback |
 | **Hardcoded DIGIT_GRID** | User provided the exact 7×20 digit sequence; avoids fragile auto-detection |
 | **Right-click undo** | Allows fixing misclicks without restarting |
-| **Pen inpainting (smart)** | HSV color masking for coloured pens; thickness filtering for black pens |
-| **Multi-channel edge fusion (smart)** | Min across BGR channels suppresses coloured pen edges while preserving black printed lines |
-| **Adaptive peak scoring** | Scores peaks by height × isolation; pads/trims to exactly 8×21 boundaries |
-| **Equal division fallback** | Always safe — used when smart detection is unreliable |
+| **Multi-signal projection (smart)** | Blends blackhat (dark thin lines), Scharr edges, and dark-pixel projection — each reinforces grid lines, each is robust to different noise types |
+| **Brute-force regular grid search** | Enforces fixed spacing + offset; avoids local noise peaks that plague peak-finding |
+| **≥3% improvement threshold** | Only uses smart detection if it's clearly better than equal division; otherwise safe fallback |
+| **Equal division fallback** | Always safe — used when smart detection confidence is low |
 
 ### Digit Grid (Row × Column)
 

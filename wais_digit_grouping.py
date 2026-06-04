@@ -174,279 +174,142 @@ def perspective_correct(
 
 
 # ══════════════════════════════════════════════════════════════
-# PHASE 3 — Smart grid-boundary detection + symbol extraction
+# PHASE 3 — Smart grid detection + symbol extraction
 # ══════════════════════════════════════════════════════════════
 
-def _remove_pen_marks(warped: np.ndarray) -> np.ndarray:
+def _multi_signal_projection(gray: np.ndarray, axis: str = 'row'
+                              ) -> np.ndarray:
     """
-    Detect and inpaint over pen strokes that cross printed grid lines.
+    Combine three complementary signals to reveal grid lines:
+      1. **Blackhat morphology** — extracts dark thin lines (grid lines)
+         on a light background.
+      2. **Scharr edge detection** — directional edge energy.
+      3. **Dark‑pixel projection** — grid lines are darker than the page.
 
-    Uses two strategies:
-      1. **Color masking** (HSV) — Coloured pens (blue, green, red, etc.)
-         are isolated by their saturation/hue and inpainted.
-      2. **Stroke‑thickness filtering** — Black pen marks are thicker than
-         printed lines.  Morphological opening removes thin printed lines,
-         leaving thick strokes behind for inpainting.
-
-    Returns a pen‑cleaned grayscale image.
+    Each signal is normalised and weighted; the blended projection
+    has clear peaks at grid‑line positions — even on faint scans.
     """
-    h, w = warped.shape[:2]
-    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-
-    # ── 1. Coloured-pen mask (HSV) ──────────────────────
-    hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
-    # Saturation > 35  &  not too dark/bright
-    col_mask = cv2.inRange(hsv, (0, 35, 30), (180, 255, 220))
-    # Dilate slightly to catch edges
-    col_mask = cv2.dilate(col_mask, np.ones((3, 3), np.uint8), iterations=1)
-
-    # ── 2. Black-pen mask (thick-stroke detection) ──────
-    # Binarise
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    _, bw = cv2.threshold(enhanced, 0, 255,
-                          cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    # Thin printed lines: long-horizontal + long-vertical opening
-    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (w // 3, 1))
-    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, h // 10))
-    thin_h = cv2.morphologyEx(bw, cv2.MORPH_OPEN, hk)
-    thin_v = cv2.morphologyEx(bw, cv2.MORPH_OPEN, vk)
-    thin_lines = cv2.bitwise_or(thin_h, thin_v)
-
-    # Thick strokes = original - thin_lines (dilated to catch outlines)
-    thick = cv2.subtract(bw, cv2.dilate(thin_lines, np.ones((2, 2)), iterations=1))
-    # Clean small noise
-    thick = cv2.morphologyEx(thick, cv2.MORPH_OPEN, np.ones((3, 3)))
-    thick_mask = cv2.dilate(thick, np.ones((4, 4), np.uint8), iterations=1)
-
-    # ── 3. Combine masks & inpaint ──────────────────────
-    pen_mask = cv2.bitwise_or(col_mask, thick_mask)
-
-    # If very little detected, skip inpainting
-    if np.sum(pen_mask > 0) < w * h * 0.002:
-        return gray
-
-    inpainted = cv2.inpaint(warped, pen_mask, inpaintRadius=5,
-                            flags=cv2.INPAINT_TELEA)
-    return cv2.cvtColor(inpainted, cv2.COLOR_BGR2GRAY)
-
-
-def _min_channel_edge(warped: np.ndarray) -> np.ndarray:
-    """
-    Compute edge strength per colour channel, then take the *minimum*
-    across channels.  Black printed grid lines activate all channels
-    equally, so they survive the min.  Coloured pen marks activate only
-    one or two channels, so they are suppressed.
-    """
-    gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
 
-    # Edge map from grayscale (baseline)
+    # ── 1. Blackhat (dark thin lines) ────────────────────
+    if axis == 'row':
+        ksize = max(w // 20, 10) * 3
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, 1))
+        bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+        proj_bh = np.sum(bh, axis=1)
+    else:
+        ksize = max(h // 20, 10) * 3
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, ksize))
+        bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+        proj_bh = np.sum(bh, axis=0)
+
+    # ── 2. Scharr directional edges ──────────────────────
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-    edge_gray = np.abs(cv2.Sobel(blurred, cv2.CV_64F, 1, 1, ksize=3))
+    if axis == 'row':
+        edges = np.abs(cv2.Scharr(blurred, cv2.CV_64F, 0, 1))
+        proj_ed = np.sum(edges, axis=1)
+    else:
+        edges = np.abs(cv2.Scharr(blurred, cv2.CV_64F, 1, 0))
+        proj_ed = np.sum(edges, axis=0)
 
-    # Edge map from each colour channel
-    edge_channels = []
-    for ci in range(3):
-        ch = warped[:, :, ci]
-        ch_blurred = cv2.GaussianBlur(ch, (3, 3), 0)
-        edge_ch = np.abs(cv2.Sobel(ch_blurred, cv2.CV_64F, 1, 1, ksize=3))
-        edge_channels.append(edge_ch)
+    # ── 3. Dark‑pixel projection ────────────────────────
+    proj_dark = np.sum(gray, axis=1) if axis == 'row' else np.sum(gray, axis=0)
+    # Invert so dark → high
+    max_val = proj_dark.max()
+    proj_dark = max_val - proj_dark if max_val > 0 else proj_dark
 
-    # Grayscale edges are the baseline; we *discount* pixels where
-    # the max channel edge is much larger than the min channel edge
-    # (this indicates a coloured pen stroke).
-    max_ch = np.maximum.reduce(edge_channels)
-    min_ch = np.minimum.reduce(edge_channels)
-    # Where colour disparity is high → coloured pen → suppress
-    disparity = max_ch - min_ch
-    colour_pen_region = disparity > 40
+    # ── Normalise each to [0, 1] ─────────────────────────
+    def _norm(arr: np.ndarray) -> np.ndarray:
+        a = arr.astype(np.float64)
+        mn, mx = a.min(), a.max()
+        return (a - mn) / (mx - mn) if mx > mn else a
 
-    # Suppress: use min of channel edges in coloured-pen regions,
-    # otherwise use grayscale edges
-    result = np.where(colour_pen_region, min_ch, edge_gray)
-    return np.uint8(result / result.max() * 255)
-
-
-def _detect_grid_clever(warped: np.ndarray) -> tuple[list[int], list[int]] | None:
-    """
-    Smart grid‑line detection that handles pen marks crossing edges.
-
-    Pipeline:
-      1. Remove coloured & thick black pen marks (inpainting).
-      2. Multi‑channel edge fusion to further suppress coloured pen.
-      3. Morphological line detection with consistency validation.
-      4. Projection peak‑finding constrained to 8 × 21 grid.
-      5. Falls back to ``None`` (equal division) if unreliable.
-
-    Returns (row_boundaries, col_boundaries) — each length 8 / 21.
-    """
-    h, w = warped.shape[:2]
-
-    # ── 1. Pen‑removed grayscale ────────────────────────
-    clean_gray = _remove_pen_marks(warped)
-
-    # ── 2. Multi‑channel edge fusion ────────────────────
-    # Use original (not inpainted) colour image for channel‑edge fusion
-    fused_edges = _min_channel_edge(warped)
-
-    # ── 3. Enhance + threshold ──────────────────────────
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(clean_gray)
-    _, bw = cv2.threshold(enhanced, 0, 255,
-                          cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    # Connect broken grid lines
-    bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, np.ones((3, 3)), iterations=1)
-
-    # ── 4. Horizontal line detection ────────────────────
-    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (w // 2, 1))
-    h_lines = cv2.morphologyEx(bw, cv2.MORPH_OPEN, hk)
-
-    # Horizontal edge projection (from fused edges + morphological)
-    row_proj_morph = np.sum(h_lines > 0, axis=1)
-    row_proj_edge = np.sum(fused_edges, axis=1)
-
-    # Combine both projections
-    row_proj = row_proj_morph.astype(np.float64) + row_proj_edge * 0.1
-
-    # ── 5. Vertical line detection ──────────────────────
-    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, h // 12))
-    v_lines = cv2.morphologyEx(bw, cv2.MORPH_OPEN, vk)
-
-    col_proj_morph = np.sum(v_lines > 0, axis=0)
-    col_proj_edge = np.sum(fused_edges, axis=0)
-    col_proj = col_proj_morph.astype(np.float64) + col_proj_edge * 0.1
-
-    # ── 6. Find peaks with grid constraints ─────────────
-    cell_h = h / GRID_ROWS
-    cell_w = w / GRID_COLS
-
-    row_peaks = _smart_peaks(row_proj, cell_h, 0.15, GRID_ROWS + 1)
-    col_peaks = _smart_peaks(col_proj, cell_w, 0.10, GRID_COLS + 1)
-
-    if row_peaks is None or col_peaks is None:
-        return None
-
-    # ── 7. Refine each peak with local edge search ──────
-    blurred = cv2.GaussianBlur(clean_gray, (3, 3), 0)
-    sobel_y = np.abs(cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3))
-    sobel_x = np.abs(cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3))
-
-    refined_rows = _refine_peaks(row_peaks, sobel_y, cell_h * 0.15, h, axis='row')
-    refined_cols = _refine_peaks(col_peaks, sobel_x, cell_w * 0.15, w, axis='col')
-
-    return refined_rows, refined_cols
-
-
-def _smart_peaks(
-    proj: np.ndarray, cell_size: float, min_frac: float, expected_n: int,
-) -> list[int] | None:
-    """
-    Find up to *expected_n* well‑separated peaks in *proj*.
-    Uses adaptive thresholds and validates spacing.
-    Returns sorted list or None if unreliable.
-    """
-    if np.max(proj) == 0:
-        return None
+    # ── Blend (blackhat strongest weight, it's the most specific) ──
+    blended = (_norm(proj_bh) * 2.0 +
+               _norm(proj_ed) * 1.0 +
+               _norm(proj_dark) * 0.8)
 
     # Smooth
-    window = max(3, int(cell_size * 0.08))
-    if window % 2 == 0:
-        window += 1
-    smooth = np.convolve(proj, np.ones(window) / window, mode='same')
+    blended = np.convolve(blended, np.ones(5) / 5, mode='same')
+    return blended
 
-    # Adaptive threshold
-    thr = max(np.max(proj) * min_frac, np.mean(proj) * 1.5)
-    strong = np.where(smooth > thr)[0]
-    if len(strong) < expected_n * 0.5:
+
+def _best_regular_grid(
+    proj: np.ndarray, img_dim: int, n_cells: int,
+) -> tuple[list[int], float] | None:
+    """
+    Search for the *regular* grid (fixed spacing + offset) that maximises
+    the projection score at each boundary position.
+
+    Returns (boundaries, score) or None if the search space is empty.
+    Best improvement over equal division must be ≥3 % to be accepted.
+    """
+    exp_spacing = img_dim / n_cells
+    eq_bounds = [int(img_dim * i / n_cells) for i in range(n_cells + 1)]
+    eq_score = sum(proj[max(0, min(b, len(proj) - 1))] for b in eq_bounds)
+
+    best_score = -1.0
+    best_bounds = None
+
+    min_sp = int(exp_spacing * 0.85)
+    max_sp = int(exp_spacing * 1.15) + 1
+
+    # Brute‑force over spacing (≈30 values) × offset (≈spacing values)
+    for spacing in range(max(min_sp, 5), max_sp):
+        for offset in range(spacing):
+            bounds = [offset + i * spacing for i in range(n_cells + 1)]
+            if bounds[0] < 0 or bounds[-1] >= img_dim:
+                continue
+            score = sum(proj[b] for b in bounds)
+            if score > best_score:
+                best_score = score
+                best_bounds = bounds
+
+    if best_bounds is None:
         return None
 
-    # Group contiguous strong bins, merging peaks closer than 15% of cell size
-    groups: list[list[int]] = []
-    for v in strong:
-        sep = int(cell_size * 0.12)
-        if not groups or v - groups[-1][-1] > sep:
-            groups.append([v])
-        else:
-            groups[-1].append(v)
-
-    candidates = [int(np.median(g)) for g in groups]
-
-    # Score each candidate: peak height × isolation
-    scored = []
-    for c in candidates:
-        lo = max(0, c - int(cell_size * 0.4))
-        hi = min(len(smooth) - 1, c + int(cell_size * 0.4))
-        local_max = np.max(smooth[lo:hi])
-        isolation = smooth[c] / max(local_max, 1)
-        scored.append((smooth[c] * isolation, c))
-
-    scored.sort(reverse=True)
-
-    # Keep top N, but require minimum score
-    min_score = np.max(smooth) * 0.05
-    top = [c for s, c in scored if s > min_score][:expected_n]
-
-    if len(top) < expected_n * 0.6:
+    improvement = (best_score - eq_score) / max(eq_score, 1e-8) * 100
+    if improvement < 3.0:
         return None
 
-    result = sorted(top)
-
-    # Pad to exactly expected_n
-    while len(result) < expected_n:
-        gaps = [(result[i + 1] - result[i], i) for i in range(len(result) - 1)]
-        gaps.sort(reverse=True)
-        mid = (result[gaps[0][1]] + result[gaps[0][1] + 1]) // 2
-        result.insert(gaps[0][1] + 1, mid)
-
-    return result
+    return best_bounds, improvement
 
 
-def _refine_peaks(
-    peaks: list[int], edge_map: np.ndarray, search_radius: float,
-    img_dim: int, axis: str = 'row',
-) -> list[int]:
+def _detect_grid(gray: np.ndarray) -> tuple[list[int], list[int]] | None:
     """
-    For each peak position, search locally for the strongest
-    consistent edge response and snap to it.
+    Full smart grid detection pipeline.
+
+    1. Compute multi‑signal row & column projections.
+    2. Find best regular grid via brute‑force.
+    3. Return detected boundaries if ≥3 % improvement over equal division.
     """
-    refined = []
-    radius = int(search_radius) + 1
+    h, w = gray.shape
 
-    for pos in peaks:
-        lo = max(0, pos - radius)
-        hi = min(img_dim, pos + radius)
+    row_proj = _multi_signal_projection(gray, axis='row')
+    col_proj = _multi_signal_projection(gray, axis='col')
 
-        if axis == 'row':
-            strip = edge_map[lo:hi, :]
-            scores = np.sum(strip, axis=1)
-        else:
-            strip = edge_map[:, lo:hi]
-            scores = np.sum(strip, axis=0)
+    r_result = _best_regular_grid(row_proj, h, GRID_ROWS)
+    c_result = _best_regular_grid(col_proj, w, GRID_COLS)
 
-        if np.max(scores) > 0:
-            best = int(np.argmax(scores) + lo)
-            # Only snap if the edge is significantly stronger
-            current_val = scores[max(0, min(pos - lo, len(scores) - 1))]
-            best_val = scores[int(np.argmax(scores))]
-            if best_val > current_val * 1.2:
-                refined.append(best)
-            else:
-                refined.append(pos)
-        else:
-            refined.append(pos)
+    if r_result is None or c_result is None:
+        return None
 
-    return refined
+    r_bounds, r_improv = r_result
+    c_bounds, c_improv = c_result
+
+    print(f"       Row improvement: {r_improv:.1f}%  "
+          f"Col improvement: {c_improv:.1f}%")
+    return r_bounds, c_bounds
 
 
 def extract_symbols(warped: np.ndarray) -> dict[int, list[np.ndarray]]:
     """
     Divide the perspective-corrected grid into 7×20 cell_groups.
 
-    First tries **smart grid detection** (pen‑removal, multi‑channel
-    edge fusion, adaptive peak finding).  If that fails, falls back
-    to simple equal division.
+    Strategy:
+      1. Try **smart grid detection** — multi‑signal projection + brute‑force
+         regular grid search (handles faint lines and pen marks).
+      2. Fall back to **equal division** — always safe.
 
     Each cell_group has a known digit (from DIGIT_GRID).
     Extract the symbol region (lower portion) of each cell_group
@@ -457,12 +320,12 @@ def extract_symbols(warped: np.ndarray) -> dict[int, list[np.ndarray]]:
     gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
     h_img, w_img = gray.shape
 
-    detected = _detect_grid_clever(warped)
+    detected = _detect_grid(gray)
     if detected is not None:
         row_bounds, col_bounds = detected
         print(f"       Smart grid detection: {len(row_bounds)}×{len(col_bounds)}")
     else:
-        print("       Smart grid detection unreliable — using equal division")
+        print("       Equal division (grid detection below threshold)")
         row_bounds = [int(h_img * i / GRID_ROWS) for i in range(GRID_ROWS + 1)]
         col_bounds = [int(w_img * i / GRID_COLS) for i in range(GRID_COLS + 1)]
 
