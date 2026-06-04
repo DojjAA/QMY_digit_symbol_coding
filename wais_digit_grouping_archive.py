@@ -14,13 +14,9 @@ Workflow:
   3. Perspective‑correct the grid region
   4. Divide corrected grid into 7×20 cell_groups using the
      known digit layout (hardcoded from the WAIS key).
-     Each cell is enlarged by 10 % on each side for overlap.
-     Extract the symbol region below the digit.
-  5. Interactive review popup:
-     • Left‑click a cell → select (green highlight)
-     • Right‑click a cell → deselect
-     • Drag to select multiple cells at once
-     • Selected‑cell counter at bottom
+     For each cell_group: extract the symbol region below the digit.
+  5. Show ONE popup: file name at top + 9 rows (one per digit),
+     each row containing all participant entries for that digit.
   6. Press Q / Enter / close popup → quit
 
 Dependencies: opencv-python, numpy, matplotlib
@@ -38,8 +34,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from matplotlib.backend_bases import KeyEvent, CloseEvent, MouseEvent
-from matplotlib.patches import Rectangle
+from matplotlib.backend_bases import KeyEvent, CloseEvent
 
 # ══════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -50,9 +45,6 @@ GRID_COLS = 20
 # Symbol extraction boundaries (fractions of cell_group height)
 SYMBOL_TOP_FRAC = 0.38
 SYMBOL_BOT_FRAC = 0.92
-
-# Cell expansion factor (fraction of cell size added to each side)
-CELL_ENLARGE = 0.1
 
 # ── Known WAIS digit layout (7 rows × 20 columns) ────────────
 DIGIT_GRID: list[list[int]] = [
@@ -182,14 +174,142 @@ def perspective_correct(
 
 
 # ══════════════════════════════════════════════════════════════
-# PHASE 3 — Extract symbols grouped by digit
+# PHASE 3 — Smart grid detection + symbol extraction
 # ══════════════════════════════════════════════════════════════
+
+def _multi_signal_projection(gray: np.ndarray, axis: str = 'row'
+                              ) -> np.ndarray:
+    """
+    Combine three complementary signals to reveal grid lines:
+      1. **Blackhat morphology** — extracts dark thin lines (grid lines)
+         on a light background.
+      2. **Scharr edge detection** — directional edge energy.
+      3. **Dark‑pixel projection** — grid lines are darker than the page.
+
+    Each signal is normalised and weighted; the blended projection
+    has clear peaks at grid‑line positions — even on faint scans.
+    """
+    h, w = gray.shape
+
+    # ── 1. Blackhat (dark thin lines) ────────────────────
+    if axis == 'row':
+        ksize = max(w // 20, 10) * 3
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, 1))
+        bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+        proj_bh = np.sum(bh, axis=1)
+    else:
+        ksize = max(h // 20, 10) * 3
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, ksize))
+        bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel)
+        proj_bh = np.sum(bh, axis=0)
+
+    # ── 2. Scharr directional edges ──────────────────────
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    if axis == 'row':
+        edges = np.abs(cv2.Scharr(blurred, cv2.CV_64F, 0, 1))
+        proj_ed = np.sum(edges, axis=1)
+    else:
+        edges = np.abs(cv2.Scharr(blurred, cv2.CV_64F, 1, 0))
+        proj_ed = np.sum(edges, axis=0)
+
+    # ── 3. Dark‑pixel projection ────────────────────────
+    proj_dark = np.sum(gray, axis=1) if axis == 'row' else np.sum(gray, axis=0)
+    # Invert so dark → high
+    max_val = proj_dark.max()
+    proj_dark = max_val - proj_dark if max_val > 0 else proj_dark
+
+    # ── Normalise each to [0, 1] ─────────────────────────
+    def _norm(arr: np.ndarray) -> np.ndarray:
+        a = arr.astype(np.float64)
+        mn, mx = a.min(), a.max()
+        return (a - mn) / (mx - mn) if mx > mn else a
+
+    # ── Blend (blackhat strongest weight, it's the most specific) ──
+    blended = (_norm(proj_bh) * 2.0 +
+               _norm(proj_ed) * 1.0 +
+               _norm(proj_dark) * 0.8)
+
+    # Smooth
+    blended = np.convolve(blended, np.ones(5) / 5, mode='same')
+    return blended
+
+
+def _best_regular_grid(
+    proj: np.ndarray, img_dim: int, n_cells: int,
+) -> tuple[list[int], float] | None:
+    """
+    Search for the *regular* grid (fixed spacing + offset) that maximises
+    the projection score at each boundary position.
+
+    Returns (boundaries, score) or None if the search space is empty.
+    Best improvement over equal division must be ≥3 % to be accepted.
+    """
+    exp_spacing = img_dim / n_cells
+    eq_bounds = [int(img_dim * i / n_cells) for i in range(n_cells + 1)]
+    eq_score = sum(proj[max(0, min(b, len(proj) - 1))] for b in eq_bounds)
+
+    best_score = -1.0
+    best_bounds = None
+
+    min_sp = int(exp_spacing * 0.85)
+    max_sp = int(exp_spacing * 1.15) + 1
+
+    # Brute‑force over spacing (≈30 values) × offset (≈spacing values)
+    for spacing in range(max(min_sp, 5), max_sp):
+        for offset in range(spacing):
+            bounds = [offset + i * spacing for i in range(n_cells + 1)]
+            if bounds[0] < 0 or bounds[-1] >= img_dim:
+                continue
+            score = sum(proj[b] for b in bounds)
+            if score > best_score:
+                best_score = score
+                best_bounds = bounds
+
+    if best_bounds is None:
+        return None
+
+    improvement = (best_score - eq_score) / max(eq_score, 1e-8) * 100
+    if improvement < 3.0:
+        return None
+
+    return best_bounds, improvement
+
+
+def _detect_grid(gray: np.ndarray) -> tuple[list[int], list[int]] | None:
+    """
+    Full smart grid detection pipeline.
+
+    1. Compute multi‑signal row & column projections.
+    2. Find best regular grid via brute‑force.
+    3. Return detected boundaries if ≥3 % improvement over equal division.
+    """
+    h, w = gray.shape
+
+    row_proj = _multi_signal_projection(gray, axis='row')
+    col_proj = _multi_signal_projection(gray, axis='col')
+
+    r_result = _best_regular_grid(row_proj, h, GRID_ROWS)
+    c_result = _best_regular_grid(col_proj, w, GRID_COLS)
+
+    if r_result is None or c_result is None:
+        return None
+
+    r_bounds, r_improv = r_result
+    c_bounds, c_improv = c_result
+
+    print(f"       Row improvement: {r_improv:.1f}%  "
+          f"Col improvement: {c_improv:.1f}%")
+    return r_bounds, c_bounds
+
 
 def extract_symbols(warped: np.ndarray) -> dict[int, list[np.ndarray]]:
     """
-    Divide the perspective-corrected grid into 7×20 equal cell_groups.
-    Each cell is enlarged by ``CELL_ENLARGE × 100 %`` on each side
-    (so neighbouring cells overlap slightly — no gap is missed).
+    Divide the perspective-corrected grid into 7×20 cell_groups.
+
+    Strategy:
+      1. Try **smart grid detection** — multi‑signal projection + brute‑force
+         regular grid search (handles faint lines and pen marks).
+      2. Fall back to **equal division** — always safe.
 
     Each cell_group has a known digit (from DIGIT_GRID).
     Extract the symbol region (lower portion) of each cell_group
@@ -200,24 +320,28 @@ def extract_symbols(warped: np.ndarray) -> dict[int, list[np.ndarray]]:
     gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
     h_img, w_img = gray.shape
 
-    row_h = h_img / GRID_ROWS
-    col_w = w_img / GRID_COLS
+    detected = _detect_grid(gray)
+    if detected is not None:
+        row_bounds, col_bounds = detected
+        print(f"       Smart grid detection: {len(row_bounds)}×{len(col_bounds)}")
+    else:
+        print("       Equal division (grid detection below threshold)")
+        row_bounds = [int(h_img * i / GRID_ROWS) for i in range(GRID_ROWS + 1)]
+        col_bounds = [int(w_img * i / GRID_COLS) for i in range(GRID_COLS + 1)]
 
     results: dict[int, list[np.ndarray]] = {d: [] for d in range(1, 10)}
 
     for ri in range(GRID_ROWS):
-        # Cell row boundaries, enlarged by CELL_ENLARGE on each side
-        y1 = max(0, int(ri * row_h - row_h * CELL_ENLARGE))
-        y2 = min(h_img, int((ri + 1) * row_h + row_h * CELL_ENLARGE))
+        y1 = row_bounds[ri]
+        y2 = row_bounds[ri + 1]
         cell_h = y2 - y1
 
         sym_y1 = y1 + int(cell_h * SYMBOL_TOP_FRAC)
         sym_y2 = y1 + int(cell_h * SYMBOL_BOT_FRAC)
 
         for ci in range(GRID_COLS):
-            # Cell column boundaries, enlarged by CELL_ENLARGE on each side
-            x1 = max(0, int(ci * col_w - col_w * CELL_ENLARGE))
-            x2 = min(w_img, int((ci + 1) * col_w + col_w * CELL_ENLARGE))
+            x1 = col_bounds[ci]
+            x2 = col_bounds[ci + 1]
             digit = DIGIT_GRID[ri][ci]
 
             symbol = gray[sym_y1:sym_y2, x1:x2]
@@ -229,244 +353,82 @@ def extract_symbols(warped: np.ndarray) -> dict[int, list[np.ndarray]]:
 
 
 # ══════════════════════════════════════════════════════════════
-# PHASE 4 — Interactive review popup with selection
+# PHASE 4 — Display grouped review popup
 # ══════════════════════════════════════════════════════════════
 
-# Layout constants for the review image
-_CELL_W = 70
-_ROW_H = 50
-_TITLE_H = 45
-_GAP = 3
-_LABEL_W = 26
-
-
-def _build_review_canvas(
+def build_review_image(
     results: dict[int, list[np.ndarray]],
     filename: str,
-) -> tuple[np.ndarray, list[tuple[int, int, int, int]], list[int], list[int]]:
+    cell_w: int = 70,
+    row_h: int = 50,
+    title_h: int = 45,
+    gap: int = 3,
+) -> np.ndarray:
     """
-    Build the review canvas and return cell metadata for interactivity.
-
-    Returns
-    -------
-    canvas : np.ndarray
-        Grayscale review image.
-    rects : list[tuple[x, y, w, h]]
-        Bounding box of each symbol on the canvas (pixel coords).
-    digits : list[int]
-        Digit (1-9) for each symbol.
-    indices : list[int]
-        Index within that digit's entry list for each symbol.
+    Build a single grayscale image:
+      • Title bar at top (file name)
+      • 9 rows, one per digit, showing all extracted symbol entries
     """
     max_entries = max(len(v) for v in results.values())
     display_n = min(max_entries, 50)
 
-    total_w = display_n * (_CELL_W + _GAP) + _GAP + _LABEL_W + 10
-    total_h = _TITLE_H + 9 * (_ROW_H + _GAP) + _GAP + 40  # +40 for counter bar
+    total_w = display_n * (cell_w + gap) + gap + 30
+    total_h = title_h + 9 * (row_h + gap) + gap
 
     canvas = np.full((total_h, total_w), 255, dtype=np.uint8)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
+
     # Title
     cv2.putText(canvas, f"File: {filename}",
-                (5, _TITLE_H - 8), font, 0.6, 0, 2, cv2.LINE_AA)
-    cv2.line(canvas, (0, _TITLE_H - 1), (total_w, _TITLE_H - 1), 180, 1)
+                (5, title_h - 8), font, 0.6, 0, 2, cv2.LINE_AA)
+    cv2.line(canvas, (0, title_h - 1), (total_w, title_h - 1), 180, 1)
 
-    rects: list[tuple[int, int, int, int]] = []
-    digits: list[int] = []
-    indices: list[int] = []
-
+    # Rows
     for d in range(1, 10):
-        row_y = _TITLE_H + _GAP + (d - 1) * (_ROW_H + _GAP)
+        row_y = title_h + gap + (d - 1) * (row_h + gap)
         entries = results.get(d, [])
 
         # Label
-        cv2.putText(canvas, f"{d}", (3, row_y + _ROW_H - 8),
+        cv2.putText(canvas, f"{d}", (3, row_y + row_h - 8),
                     font, 0.5, 50, 1, cv2.LINE_AA)
-        cv2.line(canvas, (_LABEL_W - 4, row_y),
-                 (_LABEL_W - 4, row_y + _ROW_H), 200, 1)
+        cv2.line(canvas, (22, row_y), (22, row_y + row_h), 200, 1)
 
-        x_pos = _LABEL_W + _GAP
-        for idx, sym in enumerate(entries[:display_n]):
-            resized = cv2.resize(sym, (_CELL_W, _ROW_H),
+        x_pos = 26
+        for sym in entries[:display_n]:
+            resized = cv2.resize(sym, (cell_w, row_h),
                                  interpolation=cv2.INTER_AREA)
-            canvas[row_y:row_y + _ROW_H, x_pos:x_pos + _CELL_W] = resized
+            canvas[row_y:row_y + row_h, x_pos:x_pos + cell_w] = resized
+            x_pos += cell_w + gap
 
-            rects.append((x_pos, row_y, _CELL_W, _ROW_H))
-            digits.append(d)
-            indices.append(idx)
-
-            x_pos += _CELL_W + _GAP
-
-    return canvas, rects, digits, indices
+    return canvas
 
 
 def show_review_popup(results: dict[int, list[np.ndarray]],
                       filename: str) -> None:
-    """
-    Interactive review popup with selection.
+    """Display the review image.  Q / Enter / close → quit."""
+    img = build_review_image(results, filename)
 
-    • Left‑click a cell  →  select / highlight green
-    • Right‑click a cell →  deselect
-    • Drag               →  select all cells inside the drag rectangle
-    • Counter at bottom shows how many cells are selected
-    • Q / Enter / close  →  quit
-    """
-    canvas, rects, digits_cell, _indices = _build_review_canvas(results, filename)
-    n_cells = len(rects)
-    selected = [False] * n_cells
-
-    fig, ax = plt.subplots(figsize=(14, 9.5))
-    ax.imshow(canvas, cmap="gray", vmin=0, vmax=255)
+    fig, ax = plt.subplots(figsize=(14, 9))
+    ax.imshow(img, cmap="gray", vmin=0, vmax=255)
     ax.set_title(
-        "WAIS Digit Symbol Coding — Select cells  "
-        "(Left=select  Right=deselect  Drag=box  Q=quit)",
-        fontsize=11, fontweight="bold",
+        "WAIS Digit Symbol Coding — Review  (press Q or Enter to quit)",
+        fontsize=12, fontweight="bold",
     )
     ax.axis("off")
 
-    # ── Selection highlight patches ──────────────────────
-    sel_patches: list[Rectangle] = []
-
-    # Counter text (bottom)
-    counter_text = ax.text(
-        0.5, -0.03, "Selected: 0 / 0",
-        transform=ax.transAxes, fontsize=12, fontweight="bold",
-        ha="center", va="top", color="green",
-    )
-
-    # ── Rubber‑band drag rectangle ───────────────────────
-    drag_rect: Rectangle | None = None
-    drag_origin: tuple[float, float] | None = None
-
-    # ── Helpers ──────────────────────────────────────────
-
-    def _refresh_highlights() -> None:
-        """Remove all selection patches and redraw from ``selected`` state."""
-        for p in sel_patches:
-            p.remove()
-        sel_patches.clear()
-        for i, s in enumerate(selected):
-            if not s:
-                continue
-            x, y, w, h = rects[i]
-            patch = Rectangle((x, y), w, h,
-                              linewidth=0, facecolor="lime", alpha=0.25,
-                              edgecolor=None)
-            ax.add_patch(patch)
-            sel_patches.append(patch)
-        counter_text.set_text(f"Selected: {sum(selected)} / {n_cells}")
-        fig.canvas.draw_idle()
-
-    def _cell_at(x: float, y: float) -> int | None:
-        """Return index of the cell containing (x, y), or None."""
-        for i, (cx, cy, cw, ch) in enumerate(rects):
-            if cx <= x <= cx + cw and cy <= y <= cy + ch:
-                return i
-        return None
-
-    def _cells_in_rect(x1: float, y1: float,
-                       x2: float, y2: float) -> list[int]:
-        """Return indices of all cells whose centre lies in the rect."""
-        x_lo, x_hi = min(x1, x2), max(x1, x2)
-        y_lo, y_hi = min(y1, y2), max(y1, y2)
-        hits = []
-        for i, (cx, cy, cw, ch) in enumerate(rects):
-            cx_c = cx + cw / 2
-            cy_c = cy + ch / 2
-            if x_lo <= cx_c <= x_hi and y_lo <= cy_c <= y_hi:
-                hits.append(i)
-        return hits
-
-    def _clear_drag_rect() -> None:
-        nonlocal drag_rect, drag_origin
-        if drag_rect is not None:
-            drag_rect.remove()
-            drag_rect = None
-        drag_origin = None
-
-    # ── Event handlers ───────────────────────────────────
-
-    def on_press(event: MouseEvent) -> None:
-        if event.inaxes != ax or event.xdata is None or event.ydata is None:
-            return
-
-        # Left button → start drag or single select
-        if event.button == 1:
-            drag_origin = (event.xdata, event.ydata)
-            # Single click (no drag yet)
-            idx = _cell_at(event.xdata, event.ydata)
-            if idx is not None:
-                selected[idx] = True
-                _refresh_highlights()
-
-        # Right button → deselect
-        elif event.button == 3:
-            idx = _cell_at(event.xdata, event.ydata)
-            if idx is not None:
-                selected[idx] = False
-                _refresh_highlights()
-
-    def on_motion(event: MouseEvent) -> None:
-        nonlocal drag_rect
-        if event.inaxes != ax or drag_origin is None:
-            return
-        if event.xdata is None or event.ydata is None:
-            return
-
-        _clear_drag_rect()
-
-        x0, y0 = drag_origin
-        x1, y1 = event.xdata, event.ydata
-
-        x_lo, x_hi = min(x0, x1), max(x0, x1)
-        y_lo, y_hi = min(y0, y1), max(y0, y1)
-
-        drag_rect = Rectangle(
-            (x_lo, y_lo), x_hi - x_lo, y_hi - y_lo,
-            linewidth=1.5, edgecolor="cyan", facecolor="cyan", alpha=0.12,
-            linestyle="--",
-        )
-        ax.add_patch(drag_rect)
-        fig.canvas.draw_idle()
-
-    def on_release(event: MouseEvent) -> None:
-        nonlocal drag_origin
-        if event.button != 1 or drag_origin is None:
-            return
-        if event.xdata is None or event.ydata is None:
-            _clear_drag_rect()
-            return
-
-        x0, y0 = drag_origin
-        x1, y1 = event.xdata, event.ydata
-
-        # Only treat as drag if moved > 5 px (otherwise it's a single click)
-        dist = np.hypot(x1 - x0, y1 - y0)
-        if dist > 5:
-            hits = _cells_in_rect(x0, y0, x1, y1)
-            for idx in hits:
-                selected[idx] = True
-            _refresh_highlights()
-
-        _clear_drag_rect()
-        drag_origin = None
+    def _quit(*_args) -> None:
+        plt.close(fig)
 
     def on_key(event: KeyEvent) -> None:
         if event.key in ("q", "Q", "enter", "escape"):
-            plt.close(fig)
+            _quit()
 
     def on_close(_event: CloseEvent) -> None:
-        pass
+        _quit()
 
-    # ── Connect events ───────────────────────────────────
-    fig.canvas.mpl_connect("button_press_event", on_press)
-    fig.canvas.mpl_connect("motion_notify_event", on_motion)
-    fig.canvas.mpl_connect("button_release_event", on_release)
     fig.canvas.mpl_connect("key_press_event", on_key)
     fig.canvas.mpl_connect("close_event", on_close)
-
-    plt.tight_layout()
     plt.show()
     sys.exit(0)
 

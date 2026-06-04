@@ -34,8 +34,9 @@ f10e5f2 (HEAD -> main, origin/main) Add images + .gitignore
 
 | File | Size | Description |
 |---|---|---|
-| `wais_digit_grouping.py` | ~19 KB | **Smart** version — pen-mark removal + multi-channel edge fusion for grid detection |
-| `wais_digit_grouping_simple.py` | ~15 KB | **Simple** version — equal-division only (the original stable one) |
+| `wais_digit_grouping.py` | ~15 KB | **Main** script with interactive selection (cell enlargement, left-click/drag/right-click selection, counter) |
+| `wais_digit_grouping_simple.py` | ~15 KB | **Simple** version — equal-division only, static popup (the original stable one) |
+| `wais_digit_grouping_archive.py` | ~19 KB | **Archived** smart grid detection version (multi-signal projection) |
 | `template.jpg` | 229 KB | Blank WAIS form (grid only, no entries) |
 | `sample.jpg` | 193 KB | Completed WAIS form (with participant entries) |
 | `README.md` | 0 B | Empty |
@@ -46,38 +47,46 @@ f10e5f2 (HEAD -> main, origin/main) Add images + .gitignore
 
 ## 3. Script Architecture
 
-### `wais_digit_grouping_simple.py` (equal-division)
+### `wais_digit_grouping_simple.py` (equal-division, static)
 
 ```
 Phase 1: Load image + user clicks 4 grid corners
 Phase 2: Perspective correction
 Phase 3: Equal 7×20 division → symbol extraction
-Phase 4: Grouped review popup (Q/Enter/close → quit)
+Phase 4: Static review popup (Q/Enter/close → quit)
 ```
 
-### `wais_digit_grouping.py` (smart grid detection)
+### `wais_digit_grouping.py` (main — interactive)
 
 ```
 Phase 1: Load image + user clicks 4 grid corners
 Phase 2: Perspective correction
-Phase 3: Smart grid detection + symbol extraction
-  ├── _multi_signal_projection() — blackhat + Scharr + dark-pixel fusion
-  ├── _best_regular_grid() — brute-force optimal spacing & offset
-  └── _detect_grid() — orchestrator, falls back to equal division
-Phase 4: Grouped review popup (Q/Enter/close → quit)
+Phase 3: Equal 7×20 division + 10% cell enlargement on each side
+Phase 4: Interactive review popup
+  ├── _build_review_canvas() — builds canvas + cell metadata
+  ├── show_review_popup() — left-click/drag select, right-click deselect
+  └── Green highlights + selected-cell counter at bottom
+```
+
+### `wais_digit_grouping_archive.py` (smart detection — archived)
+
+```
+Same as main but with multi-signal projection grid detection.
+Kept for reference but superseded.
 ```
 
 ### Key Design Decisions
 
 | Decision | Rationale |
 |---|---|
-| **Two scripts** | Smart version handles pen-over-line cases; simple version is always-stable fallback |
+| **Three scripts** | Main = interactive; Simple = stable fallback; Archive = reference |
 | **Hardcoded DIGIT_GRID** | User provided the exact 7×20 digit sequence; avoids fragile auto-detection |
-| **Right-click undo** | Allows fixing misclicks without restarting |
-| **Multi-signal projection (smart)** | Blends blackhat (dark thin lines), Scharr edges, and dark-pixel projection — each reinforces grid lines, each is robust to different noise types |
-| **Brute-force regular grid search** | Enforces fixed spacing + offset; avoids local noise peaks that plague peak-finding |
-| **≥3% improvement threshold** | Only uses smart detection if it's clearly better than equal division; otherwise safe fallback |
-| **Equal division fallback** | Always safe — used when smart detection confidence is low |
+| **Right-click undo** | (corner selection) Allows fixing misclicks without restarting |
+| **10% cell enlargement** | Each cell extends 0.1×cell_size beyond its boundary — no gap missed |
+| **Left-click select / Right-click deselect** | Intuitive desktop-window-style interaction |
+| **Drag selection** | Draw a rubber-band rectangle; all cells whose centre lies inside are selected |
+| **Counter at bottom** | Shows selected / total, updates in real-time |
+| **Q / Enter / Escape / close** | All quit the popup |
 
 ### Digit Grid (Row × Column)
 
