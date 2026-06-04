@@ -54,6 +54,9 @@ SYMBOL_BOT_FRAC = 0.92
 # Cell expansion factor (fraction of cell size added to each side)
 CELL_ENLARGE = 0.15
 
+# Number of sample/demo cells at the start of row 1 (skipped during extraction)
+SAMPLE_COUNT = 7
+
 # ── Known WAIS digit layout (7 rows × 20 columns) ────────────
 DIGIT_GRID: list[list[int]] = [
     [2, 1, 3, 7, 2, 4, 8, 2, 1, 3, 2, 1, 4, 2, 3, 5, 2, 3, 1, 4],
@@ -403,7 +406,10 @@ def extract_symbols(warped: np.ndarray) -> dict[int, list[np.ndarray]]:
         sym_y1 = y1 + int(cell_h * SYMBOL_TOP_FRAC)
         sym_y2 = y1 + int(cell_h * SYMBOL_BOT_FRAC)
 
-        for ci in range(GRID_COLS):
+        # Skip sample cells in the first row
+        col_start = SAMPLE_COUNT if ri == 0 else 0
+
+        for ci in range(col_start, GRID_COLS):
             # Cell column boundaries, enlarged by CELL_ENLARGE on each side
             x1 = max(0, int(ci * col_w - col_w * CELL_ENLARGE))
             x2 = min(w_img, int((ci + 1) * col_w + col_w * CELL_ENLARGE))
@@ -564,10 +570,23 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
         fig.canvas.blit(fig.bbox)
 
     def _full_refresh() -> None:
-        """Full redraw + re‑capture background (used on window resize)."""
+        """Full redraw + re‑capture background (used on window resize).
+        Temporarily strips animated artists so they never bake into _bg."""
         nonlocal _bg
+        # Remember state
+        old_text = counter_text.get_text()
+        old_patches = dict(sel_patches)
+        # Strip
+        counter_text.set_text("")
+        for p in old_patches.values():
+            p.remove()
+        sel_patches.clear()
         fig.canvas.draw()
         _bg = fig.canvas.copy_from_bbox(fig.bbox)
+        # Restore
+        counter_text.set_text(old_text)
+        for idx in old_patches:
+            _select(idx)
         _blit()
 
     # ── Cell ops (dict‑backed, O(1)) ──────────────────────
@@ -831,7 +850,7 @@ def main() -> None:
     results = extract_symbols(warped)
 
     total = sum(len(v) for v in results.values())
-    print(f"       Total cell_groups processed: {total} / {GRID_ROWS * GRID_COLS}")
+    print(f"       Total cell_groups processed: {total} / {GRID_ROWS * GRID_COLS - SAMPLE_COUNT}")
     for d in range(1, 10):
         print(f"         Digit {d}: {len(results[d])} entries")
 
