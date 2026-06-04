@@ -1,12 +1,14 @@
-#!/usr/bin/env python3
 """
 WAIS Digit Symbol Coding — Grid Digit Grouping & Review Tool
 
 Usage:
-    python wais_digit_grouping.py <input_image>
+    Double-click the script, or run:
+        python wais_digit_grouping.py [image_path]
+
+    If no path is given, a file-open dialog appears.
 
 Workflow:
-  1. Load input image → display in popup
+  1. Open image (dialog or CLI arg) → display in popup
   2. User clicks 4 corners of the entry grid (TL→TR→BR→BL)
   3. Load digit references from template.jpg key boxes
   4. Perspective‑correct the grid region
@@ -408,12 +410,33 @@ def show_review_popup(
 # MAIN
 # ══════════════════════════════════════════════════════════════
 
-def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: python wais_digit_grouping.py <input_image>")
-        sys.exit(1)
+def _pick_image_via_dialog() -> str | None:
+    """Open a native file‑chooser dialog and return the selected path."""
+    import tkinter as tk
+    from tkinter import filedialog
 
-    input_path = sys.argv[1]
+    root = tk.Tk()
+    root.withdraw()  # hide the main window
+    root.wm_attributes('-topmost', 1)
+
+    path = filedialog.askopenfilename(
+        title="Select a WAIS form image",
+        filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.tiff"), ("All files", "*.*")],
+    )
+    root.destroy()
+    return path if path else None
+
+
+def main() -> None:
+    if len(sys.argv) >= 2:
+        input_path = sys.argv[1]
+    else:
+        print("No image given — opening file dialog …")
+        input_path = _pick_image_via_dialog()
+        if not input_path:
+            print("No file selected.  Exiting.")
+            sys.exit(0)
+
     filename = os.path.basename(input_path)
 
     print(f"\n{'=' * 60}")
