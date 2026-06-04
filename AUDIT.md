@@ -59,10 +59,14 @@ Phase 4: Static review popup (Q/Enter/close → quit)
 ### `wais_digit_grouping.py` (main — interactive)
 
 ```
-Phase 1: Load image + user clicks 4 grid corners
+Phase 1: Two-stage corner selection
+  ├── Stage 1: Click 4 corners (TL→TR→BR→BL), right-click undo
+  └── Stage 2: 3×3 control grid auto-generated (4 edge midpoints + centre)
+               All 9 dots draggable; wireframe updates live
+               Press Enter → homography fit → optimal 4 corners
 Phase 2: Perspective correction
-Phase 3: Equal 7×20 division + 10% cell enlargement on each side
-Phase 4: Interactive review popup
+Phase 3: Equal 7×20 division + 15% cell enlargement on each side
+Phase 4: Interactive review popup (blitting-accelerated)
   ├── _build_review_canvas() — builds canvas + cell metadata
   ├── show_review_popup() — left-click/drag select, right-click deselect
   └── Green highlights + selected-cell counter at bottom
@@ -82,10 +86,12 @@ Kept for reference but superseded.
 | **Three scripts** | Main = interactive; Simple = stable fallback; Archive = reference |
 | **Hardcoded DIGIT_GRID** | User provided the exact 7×20 digit sequence; avoids fragile auto-detection |
 | **Right-click undo** | (corner selection) Allows fixing misclicks without restarting |
-| **10% cell enlargement** | Each cell extends 0.1×cell_size beyond its boundary — no gap missed |
+| **3×3 control grid** | After placing 4 corners, auto-generates midpoints + centre — user can warp by dragging any of the 9 dots |
+| **Homography optimisation** | `cv2.findHomography()` on all 9 points → projects unit-square corners through H → best-fit perspective rectangle |
+| **15% cell enlargement** | Each cell extends 0.15×cell_size beyond its boundary — no gap missed |
 | **Left-click select / Right-click deselect** | Intuitive desktop-window-style interaction |
 | **Drag selection** | Draw a rubber-band rectangle; all cells whose centre lies inside are selected |
-| **Counter at bottom** | Shows selected / total, updates in real-time |
+| **Counter at bottom** | Shows selected / total, updates in real-time via blitting |
 | **Q / Enter / Escape / close** | All quit the popup |
 
 ### Digit Grid (Row × Column)

@@ -52,7 +52,7 @@ SYMBOL_TOP_FRAC = 0.38
 SYMBOL_BOT_FRAC = 0.92
 
 # Cell expansion factor (fraction of cell size added to each side)
-CELL_ENLARGE = 0.3
+CELL_ENLARGE = 0.15
 
 # ── Known WAIS digit layout (7 rows × 20 columns) ────────────
 DIGIT_GRID: list[list[int]] = [
@@ -67,7 +67,8 @@ DIGIT_GRID: list[list[int]] = [
 
 
 # ══════════════════════════════════════════════════════════════
-# PHASE 1 — Load image & let user click four corners
+# PHASE 1 — Load image & let user place 4 corners,
+#            then fine-tune with 9 draggable control points
 # ══════════════════════════════════════════════════════════════
 
 def load_image(path: str) -> np.ndarray:
@@ -78,37 +79,91 @@ def load_image(path: str) -> np.ndarray:
     return img
 
 
+def _optimize_corners_from_3x3(pts: list[tuple[float, float]]
+                               ) -> list[tuple[int, int]]:
+    """
+    Given 9 control points arranged as a 3×3 grid in reading order:
+
+        TL  top‑mid  TR
+        left‑mid  centre  right‑mid
+        BL  bot‑mid  BR
+
+    fit a homography from a regular unit 3×3 grid to these points,
+    then extract the 4 corners.  This "rectangularises" the user's
+    warped grid into the best perspective rectangle.
+    """
+    src = np.array([
+        [0, 0], [0.5, 0], [1, 0],
+        [0, 0.5], [0.5, 0.5], [1, 0.5],
+        [0, 1], [0.5, 1], [1, 1],
+    ], dtype=np.float32)
+    dst = np.array(pts, dtype=np.float32)
+
+    H, _ = cv2.findHomography(src, dst)
+    if H is None:
+        # fallback — just use the four corners as-is
+        return [(int(round(pts[i][0])), int(round(pts[i][1])))
+                for i in (0, 2, 8, 6)]
+
+    # Project the 4 corners of the unit square through H
+    unit_corners = np.array([[0, 0], [1, 0], [1, 1], [0, 1]],
+                            dtype=np.float32)
+    warped = cv2.perspectiveTransform(unit_corners.reshape(-1, 1, 2), H)
+    warped = warped.reshape(-1, 2)
+
+    return [(int(round(p[0])), int(round(p[1]))) for p in warped]
+
+
 def select_four_corners(img: np.ndarray, filename: str
                         ) -> list[tuple[int, int]]:
     """
-    Display the image.  Left-click TL → TR → BR → BL.
-    Right-click to undo the last click.
-    Returns list of four (x, y) tuples.
+    Two‑stage corner selection:
+
+    **Stage 1** — click 4 corners (TL → TR → BR → BL),
+                   right‑click to undo.
+
+    **Stage 2** — the system auto‑generates 5 extra control points
+                   (4 edge midpoints + centre) forming a 3×3 grid.
+                   All 9 dots are **draggable**; the grid wireframe
+                   updates live.  Press **Enter** to apply a smart
+                   homography fit that returns the optimal 4 corners
+                   of a perspective rectangle.
+
+    Returns the four optimised corner coordinates.
     """
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h_img, w_img = img.shape[:2]
 
     fig, ax = plt.subplots(figsize=(12, 16))
     ax.imshow(img_rgb)
-    ax.set_title(
-        "Click the 4 corners of the ENTRY GRID:\n"
-        "Left-click: TL → TR → BR → BL     "
-        "Right-click: undo last corner\n"
-        f"File: {filename}",
-        fontsize=11, fontweight="bold",
-    )
     ax.axis("on")
 
+    # ── Stage-1 state ────────────────────────────────────
     corners: list[tuple[int, int]] = []
     colors = ["red", "lime", "cyan", "magenta"]
     labels = ["TL", "TR", "BR", "BL"]
-    # Store plot artists so we can remove them on undo
     artists: list = []
 
-    def _redraw():
-        """Clear and redraw all markers/polygon from scratch."""
-        for a in artists:
+    # ── Stage-2 state ────────────────────────────────────
+    # 9 control points in reading order: TL..BR (3×3)
+    ctrl: list[tuple[float, float]] | None = None
+    ctrl_artists: list = []        # plotted dots
+    grid_lines: list = []          # plotted wireframe segments
+    drag_idx: int | None = None    # which control point is being dragged
+    stage2_active = False
+
+    # ── Common helpers ───────────────────────────────────
+
+    def _clear_all():
+        nonlocal stage2_active, ctrl, drag_idx
+        stage2_active = False
+        ctrl = None
+        drag_idx = None
+        for a in artists + ctrl_artists + grid_lines:
             a.remove()
         artists.clear()
+        ctrl_artists.clear()
+        grid_lines.clear()
         ax.set_title(
             "Click the 4 corners of the ENTRY GRID:\n"
             "Left-click: TL → TR → BR → BL     "
@@ -116,13 +171,16 @@ def select_four_corners(img: np.ndarray, filename: str
             f"File: {filename}",
             fontsize=11, fontweight="bold",
         )
+
+    def _redraw_stage1():
+        _clear_all()
         for i, (x, y) in enumerate(corners):
             (pt,) = ax.plot(x, y, "o", color=colors[i], markersize=10)
             artists.append(pt)
             ann = ax.annotate(
                 f"{labels[i]}  ({x}, {y})",
-                (x, y),
-                fontsize=10, color=colors[i], fontweight="bold",
+                (x, y), fontsize=10, color=colors[i],
+                fontweight="bold",
                 xytext=(8, 8), textcoords="offset pixels",
             )
             artists.append(ann)
@@ -133,29 +191,160 @@ def select_four_corners(img: np.ndarray, filename: str
             artists.append(poly)
         fig.canvas.draw()
 
-    def on_click(event):
+    def _make_ctrl() -> list[tuple[float, float]]:
+        """Generate the 9 control points from the 4 corners."""
+        def _mid(pa, pb):
+            return ((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2)
+
+        top_mid = _mid(corners[0], corners[1])
+        bot_mid = _mid(corners[3], corners[2])
+        left_mid = _mid(corners[0], corners[3])
+        right_mid = _mid(corners[1], corners[2])
+        centre = _mid(top_mid, bot_mid)
+
+        return [
+            corners[0], top_mid, corners[1],
+            left_mid, centre, right_mid,
+            corners[3], bot_mid, corners[2],
+        ]
+
+    def _draw_grid():
+        """Draw the 3×3 wireframe + 9 control dots on top of the image."""
+        nonlocal stage2_active
+        # Remove previous grid/dots
+        for a in ctrl_artists + grid_lines:
+            a.remove()
+        ctrl_artists.clear()
+        grid_lines.clear()
+
+        if ctrl is None:
+            return
+
+        stage2_active = True
+        xs = [p[0] for p in ctrl]
+        ys = [p[1] for p in ctrl]
+
+        # ── Wireframe (3×3 grid) ─────────────────────────
+        # Horizontal lines
+        for row in range(3):
+            i0 = row * 3
+            line, = ax.plot([xs[i0], xs[i0 + 2]], [ys[i0], ys[i0 + 2]],
+                           color="yellow", linewidth=1.5, linestyle="-")
+            grid_lines.append(line)
+        # Vertical lines
+        for col in range(3):
+            line, = ax.plot([xs[col], xs[col + 6]], [ys[col], ys[col + 6]],
+                           color="yellow", linewidth=1.5, linestyle="-")
+            grid_lines.append(line)
+
+        # ── Control dots ─────────────────────────────────
+        for i in range(9):
+            colours = ["red", "lime", "cyan", "magenta", "orange",
+                       "cyan", "magenta", "lime", "red"]
+            (dot,) = ax.plot(xs[i], ys[i], "o",
+                             color=colours[i], markersize=6, zorder=5)
+            ctrl_artists.append(dot)
+
+        ax.set_title(
+            "Drag any dot to adjust the grid  |  "
+            "Press Enter to confirm",
+            fontsize=11, fontweight="bold",
+        )
+        fig.canvas.draw()
+
+    def _ctrl_at(x: float, y: float, radius: float = 12
+                 ) -> int | None:
+        """Return the index of the control point nearest (x,y) within radius."""
+        if ctrl is None:
+            return None
+        best, best_dist = None, radius
+        for i, (cx, cy) in enumerate(ctrl):
+            d = np.hypot(x - cx, y - cy)
+            if d < best_dist:
+                best_dist = d
+                best = i
+        return best
+
+    # ── Event handlers ───────────────────────────────────
+
+    def on_press(event):
+        nonlocal drag_idx, stage2_active
         if event.inaxes != ax:
             return
-        # Right-click → undo
-        if event.button == 3:
-            if corners:
-                corners.pop()
-                _redraw()
+        if event.xdata is None or event.ydata is None:
             return
-        # Left-click → add corner
-        if event.button != 1 or len(corners) >= 4:
-            return
-        x, y = int(round(event.xdata)), int(round(event.ydata))
-        corners.append((x, y))
-        _redraw()
 
-    fig.canvas.mpl_connect("button_press_event", on_click)
+        # Right-click → undo in stage 1
+        if event.button == 3:
+            if not stage2_active and corners:
+                corners.pop()
+                _redraw_stage1()
+            return
+
+        if event.button != 1:
+            return
+
+        if stage2_active and ctrl is not None:
+            # Try to pick up a control point
+            idx = _ctrl_at(event.xdata, event.ydata)
+            if idx is not None:
+                drag_idx = idx
+            return
+
+        # Stage 1: left-click → add corner
+        if len(corners) < 4:
+            x, y = int(round(event.xdata)), int(round(event.ydata))
+            corners.append((x, y))
+            _redraw_stage1()
+            # If we just got the 4th corner, auto-enter stage 2
+            if len(corners) == 4:
+                ctrl = _make_ctrl()
+                _draw_grid()
+
+    def on_motion(event):
+        nonlocal drag_idx
+        if drag_idx is None or ctrl is None or event.xdata is None or event.ydata is None:
+            return
+        if event.inaxes != ax:
+            return
+        # Clamp to image bounds
+        x = max(0, min(event.xdata, w_img - 1))
+        y = max(0, min(event.ydata, h_img - 1))
+        ctrl[drag_idx] = (x, y)
+        _draw_grid()
+
+    def on_release(event):
+        nonlocal drag_idx
+        if event.button == 1:
+            drag_idx = None
+
+    def on_key(event):
+        if event.key in ("enter",):
+            if ctrl is not None:
+                plt.close(fig)
+        elif event.key in ("escape", "q", "Q"):
+            plt.close(fig)
+
+    def on_close(_event):
+        pass
+
+    fig.canvas.mpl_connect("button_press_event", on_press)
+    fig.canvas.mpl_connect("motion_notify_event", on_motion)
+    fig.canvas.mpl_connect("button_release_event", on_release)
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    fig.canvas.mpl_connect("close_event", on_close)
+
     plt.show()
 
-    if len(corners) != 4:
+    if ctrl is not None:
+        print("       Optimising corners from 3×3 control grid …")
+        return _optimize_corners_from_3x3(ctrl)
+    elif len(corners) == 4:
+        # User pressed Escape before dragging — use raw corners
+        return corners
+    else:
         print("ERROR: You must click exactly 4 corners.")
         sys.exit(1)
-    return corners
 
 
 # ══════════════════════════════════════════════════════════════
@@ -527,7 +716,9 @@ def main() -> None:
     # ── 1. Load & corners ───────────────────────────────
     print("\n[1/4] Loading input image …")
     img = load_image(input_path)
-    print("       Left-click 4 grid corners (right-click to undo).")
+    print("       Stage 1 — Click 4 grid corners (right-click to undo).")
+    print("       Stage 2 — Drag any of the 9 control points to warp.")
+    print("                 Press Enter to confirm and optimise.")
     corners = select_four_corners(img, filename)
 
     # ── 2. Perspective correction ───────────────────────
