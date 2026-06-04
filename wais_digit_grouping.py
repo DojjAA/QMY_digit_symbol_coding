@@ -505,6 +505,15 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     n_cells = len(rects)
 
     fig, ax = plt.subplots(figsize=(14, 9.5))
+    # Hide the navigation toolbar (the extra popup-like bar)
+    try:
+        fig.canvas.toolbar_visible = False
+    except AttributeError:
+        try:
+            fig.canvas.toolbar.visible = False
+        except AttributeError:
+            pass
+
     ax.imshow(canvas, cmap="gray", vmin=0, vmax=255,
               interpolation="nearest")
     ax.set_title(
@@ -534,14 +543,18 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
 
     # State
     drag_origin: tuple[float, float] | None = None
+    _bg: object | None = None  # saved blit background, refreshed on resize
+    _resizing = False  # guard against recursive resize_draw() calls
 
     # ── Blit helpers ──────────────────────────────────────
 
-    _ANIMATED_ARTISTS: list = []  # filled after initial draw
+    _ANIMATED_ARTISTS: list = []
 
     def _blit() -> None:
-        """Redraw only animated artists on the saved background."""
-        fig.canvas.restore_region(_bg)  # type: ignore[name-defined]
+        nonlocal _bg
+        if _bg is None:
+            return
+        fig.canvas.restore_region(_bg)  # type: ignore[arg-type]
         for a in _ANIMATED_ARTISTS:
             ax.draw_artist(a)
         if drag_rect.get_visible():
@@ -549,6 +562,13 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
         for p in sel_patches.values():
             ax.draw_artist(p)
         fig.canvas.blit(fig.bbox)
+
+    def _full_refresh() -> None:
+        """Full redraw + re‑capture background (used on window resize)."""
+        nonlocal _bg
+        fig.canvas.draw()
+        _bg = fig.canvas.copy_from_bbox(fig.bbox)
+        _blit()
 
     # ── Cell ops (dict‑backed, O(1)) ──────────────────────
 
@@ -652,17 +672,27 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     def on_close(_event: CloseEvent) -> None:
         pass
 
+    def on_resize(_event) -> None:
+        """Re‑render everything cleanly when the window is resized."""
+        nonlocal _resizing
+        if _resizing:
+            return
+        _resizing = True
+        _full_refresh()
+        _resizing = False
+
     # ── Connect events ───────────────────────────────────
     fig.canvas.mpl_connect("button_press_event", on_press)
     fig.canvas.mpl_connect("motion_notify_event", on_motion)
     fig.canvas.mpl_connect("button_release_event", on_release)
     fig.canvas.mpl_connect("key_press_event", on_key)
     fig.canvas.mpl_connect("close_event", on_close)
+    fig.canvas.mpl_connect("resize_event", on_resize)
 
     # ── Initial full render + save background (WITHOUT text) ──
     plt.tight_layout()
     fig.canvas.draw()
-    _bg = fig.canvas.copy_from_bbox(fig.bbox)  # type: ignore[name-defined]
+    _bg = fig.canvas.copy_from_bbox(fig.bbox)
 
     # Text lives purely as an animated overlay (never baked into _bg)
     counter_text.set_text(f"Selected: 0 / {n_cells}")
