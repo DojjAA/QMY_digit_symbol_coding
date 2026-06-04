@@ -34,7 +34,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from matplotlib.backend_bases import KeyEvent, CloseEvent, MouseEvent
+from matplotlib.backend_bases import KeyEvent, CloseEvent
 
 # ══════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -174,142 +174,15 @@ def perspective_correct(
 
 
 # ══════════════════════════════════════════════════════════════
-# PHASE 3 — Refine grid boundaries + extract symbols
+# PHASE 3 — Extract symbols grouped by digit
 # ══════════════════════════════════════════════════════════════
-
-def _peaks_from_proj(
-    proj: np.ndarray, cell_size: float, min_frac: float = 0.18,
-) -> list[int]:
-    """Find well-separated peaks in a 1D projection."""
-    if np.max(proj) == 0:
-        return []
-    thr = np.max(proj) * min_frac
-    smooth = np.convolve(proj, np.ones(5) / 5, mode="same")
-    strong = np.where(smooth > thr)[0]
-    if len(strong) < 3:
-        return []
-    groups: list[list[int]] = []
-    for v in strong:
-        if not groups or v - groups[-1][-1] > int(cell_size * 0.12):
-            groups.append([v])
-        else:
-            groups[-1].append(v)
-    return [int(np.median(g)) for g in groups if len(g) >= 2]
-
-
-def _pad_to_target(values: list[int], n: int) -> list[int]:
-    """Pad or trim *values* to exactly *n* items, interpolating gaps."""
-    if len(values) >= n:
-        vals = sorted(values)
-        while len(vals) > n:
-            gaps = [(vals[i + 1] - vals[i], i) for i in range(len(vals) - 1)]
-            gaps.sort()
-            vals.pop(gaps[0][1])
-        return vals
-    vals = sorted(values)
-    while len(vals) < n:
-        gaps = [(vals[i + 1] - vals[i], i) for i in range(len(vals) - 1)]
-        gaps.sort(reverse=True)
-        mid = (vals[gaps[0][1]] + vals[gaps[0][1] + 1]) // 2
-        vals.insert(gaps[0][1] + 1, mid)
-    return vals
-
-
-def _detect_grid_lines(gray: np.ndarray) -> tuple[list[int], list[int]] | None:
-    """
-    Multi‑tier grid line detection.
-
-    Tier 1 — Morphological line detection (clear, high‑contrast scans)
-    Tier 2 — Edge‑strength × consistency snapping (medium contrast)
-    Tier 3 — Returns ``None`` → caller uses equal‑division fallback
-
-    Returns (row_boundaries, col_boundaries) with 8 and 21 items,
-    or None if both tiers fail.
-    """
-    h, w = gray.shape
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-
-    cell_h = h / GRID_ROWS
-    cell_w = w / GRID_COLS
-
-    exp_rows = [int(h * i / GRID_ROWS) for i in range(GRID_ROWS + 1)]
-    exp_cols = [int(w * i / GRID_COLS) for i in range(GRID_COLS + 1)]
-
-    # ── Directed edge responses ─────────────────────────
-    sobel_y = np.abs(cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3))
-    sobel_x = np.abs(cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3))
-    # Normalise to 0–255
-    sobel_y = np.uint8(sobel_y / sobel_y.max() * 255)
-    sobel_x = np.uint8(sobel_x / sobel_x.max() * 255)
-
-    # ── Tier 1 — Morphological line detection ───────────
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    _, bw = cv2.threshold(enhanced, 0, 255,
-                          cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    bw = cv2.dilate(bw, np.ones((2, 2), np.uint8), iterations=1)
-
-    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (w // 2, 1))
-    h_lines = cv2.morphologyEx(bw, cv2.MORPH_OPEN, hk)
-    row_morph = _peaks_from_proj(np.sum(h_lines > 0, axis=1), cell_h)
-
-    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, h // 15))
-    v_lines = cv2.morphologyEx(bw, cv2.MORPH_OPEN, vk)
-    col_morph = _peaks_from_proj(np.sum(v_lines > 0, axis=0), cell_w)
-
-    if len(row_morph) >= 6 and len(col_morph) >= 18:
-        return (_pad_to_target(row_morph, GRID_ROWS + 1),
-                _pad_to_target(col_morph, GRID_COLS + 1))
-
-    # ── Tier 2 — Snapping with consistency filter ──────
-    snapped_rows: list[int] = []
-    for ey in exp_rows:
-        radius = int(cell_h * 0.18) + 1
-        lo, hi = max(0, ey - radius), min(h, ey + radius)
-        strip = sobel_y[lo:hi, :]
-        scores = []
-        for r in range(strip.shape[0]):
-            row_vals = strip[r, :]
-            strength = float(np.mean(row_vals))
-            segments = np.array_split(row_vals, 5)
-            uniformity = 1.0 / (1.0 + float(np.std([np.mean(s)
-                                                     for s in segments])))
-            scores.append(strength * uniformity)
-        snapped_rows.append(int(np.argmax(scores) + lo))
-
-    snapped_cols: list[int] = []
-    for ex in exp_cols:
-        radius = int(cell_w * 0.18) + 1
-        lo, hi = max(0, ex - radius), min(w, ex + radius)
-        strip = sobel_x[:, lo:hi]
-        scores = []
-        for c in range(strip.shape[1]):
-            col_vals = strip[:, c]
-            strength = float(np.mean(col_vals))
-            segments = np.array_split(col_vals, 5)
-            uniformity = 1.0 / (1.0 + float(np.std([np.mean(s)
-                                                     for s in segments])))
-            scores.append(strength * uniformity)
-        snapped_cols.append(int(np.argmax(scores) + lo))
-
-    row_diff = np.mean([abs(snapped_rows[i] - exp_rows[i])
-                        for i in range(GRID_ROWS + 1)])
-    col_diff = np.mean([abs(snapped_cols[i] - exp_cols[i])
-                        for i in range(GRID_COLS + 1)])
-
-    # Use snapped boundaries if movements are reasonable
-    if row_diff < cell_h * 0.12 and col_diff < cell_w * 0.12:
-        return snapped_rows, snapped_cols
-
-    return None  # Tier 3: caller falls back to equal division
-
 
 def extract_symbols(warped: np.ndarray) -> dict[int, list[np.ndarray]]:
     """
-    Divide the perspective-corrected grid into 7×20 cell_groups.
-    First tries to detect actual printed grid lines for precise
-    alignment (handles paper warp); falls back to equal division
-    if line detection is unreliable.
+    Divide the perspective-corrected grid into 7×20 equal cell_groups.
+    The 4-corner perspective correction already handles most paper
+    warp; equal division of the corrected rectangle is the most
+    robust approach for forms with faint grid lines.
 
     Each cell_group has a known digit (from DIGIT_GRID).
     Extract the symbol region (lower portion) of each cell_group
@@ -320,31 +193,22 @@ def extract_symbols(warped: np.ndarray) -> dict[int, list[np.ndarray]]:
     gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
     h_img, w_img = gray.shape
 
-    detected = _detect_grid_lines(gray)
-    if detected is not None:
-        row_bounds, col_bounds = detected
-        print(f"       Grid line detection: "
-              f"{len(row_bounds)}×{len(col_bounds)} boundaries")
-    else:
-        print("       Grid line detection unreliable — using equal division")
-        row_bounds = [int(h_img * i / GRID_ROWS)
-                      for i in range(GRID_ROWS + 1)]
-        col_bounds = [int(w_img * i / GRID_COLS)
-                      for i in range(GRID_COLS + 1)]
+    row_h = h_img / GRID_ROWS
+    col_w = w_img / GRID_COLS
 
     results: dict[int, list[np.ndarray]] = {d: [] for d in range(1, 10)}
 
     for ri in range(GRID_ROWS):
-        y1 = row_bounds[ri]
-        y2 = row_bounds[ri + 1]
+        y1 = int(ri * row_h)
+        y2 = int((ri + 1) * row_h)
         cell_h = y2 - y1
 
         sym_y1 = y1 + int(cell_h * SYMBOL_TOP_FRAC)
         sym_y2 = y1 + int(cell_h * SYMBOL_BOT_FRAC)
 
         for ci in range(GRID_COLS):
-            x1 = col_bounds[ci]
-            x2 = col_bounds[ci + 1]
+            x1 = int(ci * col_w)
+            x2 = int((ci + 1) * col_w)
             digit = DIGIT_GRID[ri][ci]
 
             symbol = gray[sym_y1:sym_y2, x1:x2]
