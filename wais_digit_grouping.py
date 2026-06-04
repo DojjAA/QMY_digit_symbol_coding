@@ -52,7 +52,7 @@ SYMBOL_TOP_FRAC = 0.38
 SYMBOL_BOT_FRAC = 0.92
 
 # Cell expansion factor (fraction of cell size added to each side)
-CELL_ENLARGE = 0.1
+CELL_ENLARGE = 0.3
 
 # ── Known WAIS digit layout (7 rows × 20 columns) ────────────
 DIGIT_GRID: list[list[int]] = [
