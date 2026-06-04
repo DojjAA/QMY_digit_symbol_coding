@@ -304,7 +304,7 @@ def _build_review_canvas(
 def show_review_popup(results: dict[int, list[np.ndarray]],
                       filename: str) -> None:
     """
-    Interactive review popup with selection.
+    Interactive review popup with selection (blitting‑accelerated).
 
     • Left‑click a cell  →  select / highlight green
     • Right‑click a cell →  deselect
@@ -312,11 +312,12 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     • Counter at bottom shows how many cells are selected
     • Q / Enter / close  →  quit
     """
-    canvas, rects, digits_cell, _indices = _build_review_canvas(results, filename)
+    canvas, rects, _digits, _indices = _build_review_canvas(results, filename)
     n_cells = len(rects)
 
     fig, ax = plt.subplots(figsize=(14, 9.5))
-    ax.imshow(canvas, cmap="gray", vmin=0, vmax=255)
+    ax.imshow(canvas, cmap="gray", vmin=0, vmax=255,
+              interpolation="nearest")
     ax.set_title(
         "WAIS Digit Symbol Coding — Select cells  "
         "(Left=select  Right=deselect  Drag=box  Q=quit)",
@@ -324,25 +325,45 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     )
     ax.axis("off")
 
-    # ── Selection highlight patches ──────────────────────
-    # Maps cell_index → Rectangle patch for O(1) lookup
-    sel_patches: dict[int, Rectangle] = {}
-
-    # Counter text (bottom)
+    # ── Text elements ─────────────────────────────────────
     counter_text = ax.text(
         0.5, -0.03, "Selected: 0 / 0",
         transform=ax.transAxes, fontsize=12, fontweight="bold",
         ha="center", va="top", color="green",
     )
 
-    # ── Rubber‑band drag rectangle ───────────────────────
-    drag_rect_patch: Rectangle | None = None
+    # ── One reusable drag‑rectangle patch ─────────────────
+    drag_rect = Rectangle(
+        (0, 0), 0, 0,
+        linewidth=1.5, edgecolor="cyan", facecolor="cyan",
+        alpha=0.12, linestyle="--", visible=False,
+    )
+    ax.add_patch(drag_rect)
+
+    # Maps cell_index → Rectangle patch for O(1) add/remove
+    sel_patches: dict[int, Rectangle] = {}
+
+    # State
     drag_origin: tuple[float, float] | None = None
 
-    # ── Helpers ──────────────────────────────────────────
+    # ── Blit helpers ──────────────────────────────────────
+
+    _ANIMATED_ARTISTS: list = []  # filled after initial draw
+
+    def _blit() -> None:
+        """Redraw only animated artists on the saved background."""
+        fig.canvas.restore_region(_bg)  # type: ignore[name-defined]
+        for a in _ANIMATED_ARTISTS:
+            ax.draw_artist(a)
+        if drag_rect.get_visible():
+            ax.draw_artist(drag_rect)
+        for p in sel_patches.values():
+            ax.draw_artist(p)
+        fig.canvas.blit(fig.bbox)
+
+    # ── Cell ops (dict‑backed, O(1)) ──────────────────────
 
     def _select(idx: int) -> None:
-        """Select a single cell (do nothing if already selected)."""
         if idx in sel_patches:
             return
         x, y, w, h = rects[idx]
@@ -353,18 +374,12 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
         sel_patches[idx] = patch
 
     def _deselect(idx: int) -> None:
-        """Deselect a single cell (do nothing if not selected)."""
         patch = sel_patches.pop(idx, None)
         if patch is None:
             return
         patch.remove()
 
-    def _update_counter() -> None:
-        counter_text.set_text(f"Selected: {len(sel_patches)} / {n_cells}")
-        fig.canvas.draw_idle()
-
     def _cell_at(x: float, y: float) -> int | None:
-        """Return index of the cell containing (x, y), or None."""
         for i, (cx, cy, cw, ch) in enumerate(rects):
             if cx <= x <= cx + cw and cy <= y <= cy + ch:
                 return i
@@ -372,7 +387,6 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
 
     def _cells_in_rect(x1: float, y1: float,
                        x2: float, y2: float) -> list[int]:
-        """Return indices of all cells whose centre lies in the rect."""
         x_lo, x_hi = min(x1, x2), max(x1, x2)
         y_lo, y_hi = min(y1, y2), max(y1, y2)
         return [i for i, (cx, cy, cw, ch) in enumerate(rects)
@@ -385,45 +399,34 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
         nonlocal drag_origin
         if event.inaxes != ax or event.xdata is None or event.ydata is None:
             return
-
         if event.button == 1:
-            # Left button → start drag
             drag_origin = (event.xdata, event.ydata)
-
         elif event.button == 3:
-            # Right button → deselect single cell
             idx = _cell_at(event.xdata, event.ydata)
             if idx is not None:
                 _deselect(idx)
-                _update_counter()
+                counter_text.set_text(
+                    f"Selected: {len(sel_patches)} / {n_cells}")
+                _blit()
 
     def on_motion(event: MouseEvent) -> None:
-        nonlocal drag_rect_patch
         if event.inaxes != ax or drag_origin is None:
             return
         if event.xdata is None or event.ydata is None:
             return
-
-        # Remove previous rubber-band rect (but KEEP drag_origin)
-        if drag_rect_patch is not None:
-            drag_rect_patch.remove()
-            drag_rect_patch = None
 
         x0, y0 = drag_origin
         x1, y1 = event.xdata, event.ydata
         x_lo, x_hi = min(x0, x1), max(x0, x1)
         y_lo, y_hi = min(y0, y1), max(y0, y1)
 
-        drag_rect_patch = Rectangle(
-            (x_lo, y_lo), x_hi - x_lo, y_hi - y_lo,
-            linewidth=1.5, edgecolor="cyan", facecolor="cyan",
-            alpha=0.12, linestyle="--",
-        )
-        ax.add_patch(drag_rect_patch)
-        fig.canvas.draw_idle()
+        drag_rect.set_bounds(x_lo, y_lo, x_hi - x_lo, y_hi - y_lo)
+        if not drag_rect.get_visible():
+            drag_rect.set_visible(True)
+        _blit()
 
     def on_release(event: MouseEvent) -> None:
-        nonlocal drag_origin, drag_rect_patch
+        nonlocal drag_origin
         if event.button != 1 or drag_origin is None:
             return
 
@@ -432,24 +435,32 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
             event.xdata is not None and event.ydata is not None
         ) else (x0, y0)
 
-        # Clear rubber-band
-        if drag_rect_patch is not None:
-            drag_rect_patch.remove()
-            drag_rect_patch = None
         drag_origin = None
+        drag_rect.set_visible(False)
 
         dist = np.hypot(x1 - x0, y1 - y0)
+        changed = False
         if dist > 5:
-            # Drag → select all cells inside rect
             for idx in _cells_in_rect(x0, y0, x1, y1):
-                _select(idx)
-            _update_counter()
+                if idx not in sel_patches:
+                    _select(idx)
+                    changed = True
         else:
-            # Single click → select one cell
             idx = _cell_at(x1, y1)
-            if idx is not None:
+            if idx is not None and idx not in sel_patches:
                 _select(idx)
-                _update_counter()
+                changed = True
+
+        if changed:
+            counter_text.set_text(
+                f"Selected: {len(sel_patches)} / {n_cells}")
+            _blit()
+        else:
+            # Still remove drag rect visually
+            fig.canvas.restore_region(_bg)  # type: ignore[name-defined]
+            for p in sel_patches.values():
+                ax.draw_artist(p)
+            fig.canvas.blit(fig.bbox)
 
     def on_key(event: KeyEvent) -> None:
         if event.key in ("q", "Q", "enter", "escape"):
@@ -465,7 +476,12 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     fig.canvas.mpl_connect("key_press_event", on_key)
     fig.canvas.mpl_connect("close_event", on_close)
 
+    # ── Initial full render + save background ────────────
     plt.tight_layout()
+    fig.canvas.draw()
+    _bg = fig.canvas.copy_from_bbox(fig.bbox)  # type: ignore[name-defined]
+    _ANIMATED_ARTISTS.extend([counter_text])
+
     plt.show()
     sys.exit(0)
 
