@@ -696,26 +696,95 @@ def _pick_image_via_dialog() -> str | None:
     return path if path else None
 
 
+def _capture_from_camera() -> tuple[np.ndarray, str]:
+    """
+    Open the default camera, show live preview in an OpenCV window.
+    Press **any key** to capture the current frame and proceed.
+
+    Returns (image, label) where label is a short descriptive name.
+    """
+    print("       Opening camera (press any key to capture, ESC to cancel) …")
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("       ERROR: Could not open camera.  Falling back to file dialog.")
+        path = _pick_image_via_dialog()
+        if not path:
+            print("       No file selected.  Exiting.")
+            sys.exit(1)
+        return load_image(path), os.path.basename(path)
+
+    # Allow a moment for the camera to warm up
+    for _ in range(10):
+        cap.read()
+
+    captured: np.ndarray | None = None
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("       Camera read failed.  Falling back to file dialog.")
+            cap.release()
+            cv2.destroyAllWindows()
+            path = _pick_image_via_dialog()
+            if not path:
+                print("       No file selected.  Exiting.")
+                sys.exit(1)
+            return load_image(path), os.path.basename(path)
+
+        # Mirror horizontally for intuitive left-right movement
+        display = cv2.flip(frame, 1)
+
+        # Overlay instruction text
+        cv2.putText(display, "Position the WAIS form, then press ANY KEY to capture",
+                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(display, "ESC to cancel",
+                    (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
+
+        cv2.imshow("WAIS Camera Capture", display)
+        key = cv2.waitKey(30) & 0xFF
+
+        if key == 27:  # ESC
+            print("       Capture cancelled by user.")
+            cap.release()
+            cv2.destroyAllWindows()
+            path = _pick_image_via_dialog()
+            if not path:
+                print("       No file selected.  Exiting.")
+                sys.exit(1)
+            return load_image(path), os.path.basename(path)
+
+        if key != 255:  # any key pressed (not a timeout)
+            # Capture without the mirror & overlay
+            captured = frame.copy()
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    label = "camera_capture.jpg"
+    print(f"       Captured {captured.shape[1]}×{captured.shape[0]} px")
+    return captured, label
+
+
 def main() -> None:
     if len(sys.argv) >= 2:
         input_path = sys.argv[1]
+        img = load_image(input_path)
+        filename = os.path.basename(input_path)
+        print(f"\n{'=' * 60}")
+        print("WAIS Digit Symbol Coding — Grouping Tool")
+        print(f"{'=' * 60}")
+        print(f"Input: {input_path}")
     else:
-        print("No image given — opening file dialog …")
-        input_path = _pick_image_via_dialog()
-        if not input_path:
-            print("No file selected.  Exiting.")
-            sys.exit(0)
-
-    filename = os.path.basename(input_path)
-
-    print(f"\n{'=' * 60}")
-    print("WAIS Digit Symbol Coding — Grouping Tool")
-    print(f"{'=' * 60}")
-    print(f"Input: {input_path}")
+        print(f"\n{'=' * 60}")
+        print("WAIS Digit Symbol Coding — Grouping Tool")
+        print(f"{'=' * 60}")
+        print("No image given — opening camera …")
+        img, filename = _capture_from_camera()
+        print(f"Input: camera capture ({filename})")
 
     # ── 1. Load & corners ───────────────────────────────
     print("\n[1/4] Loading input image …")
-    img = load_image(input_path)
     print("       Stage 1 — Click 4 grid corners (right-click to undo).")
     print("       Stage 2 — Drag any of the 9 control points to warp.")
     print("                 Press Enter to confirm and optimise.")
