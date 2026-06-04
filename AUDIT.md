@@ -48,12 +48,12 @@ f10e5f2 (HEAD -> main, origin/main) Add images + .gitignore
 ```
 wais_digit_grouping.py
 ├── Phase 1: Load image + user clicks 4 grid corners (matplotlib)
-├── Phase 2: Load digit references from template.jpg key boxes
-├── Phase 3: Perspective correction of the grid region
-├── Phase 4: Divide grid → 7×20 equal cells
-│   ├── For each cell: binarise top 35% → binary IoU match vs 9 digit refs
-│   └── Extract participant's symbol from lower 38–92% of cell
-└── Phase 5: Single popup with filename + 9 rows (one per digit)
+│             Left-click = add corner, Right-click = undo last
+├── Phase 2: Perspective correction of the grid region
+├── Phase 3: Divide grid → 7×20 equal cell_groups
+│     For each cell_group: read known digit from DIGIT_GRID (hardcoded)
+│     Extract symbol region from lower 38–92% of cell_group
+└── Phase 4: Single popup with filename + 9 rows (one per digit)
     └── Q / Enter / close → quit
 ```
 
@@ -61,25 +61,22 @@ wais_digit_grouping.py
 
 | Decision | Rationale |
 |---|---|
-| **Binary IoU matching** (not pixel NCC) | Robust to contrast/lighting differences across scans |
-| **Digit refs from template.jpg** (not input) | Template has cleanest key boxes; input may be low-quality |
-| **Equal 7×20 grid division** (not line detection) | WAIS forms have uniform grid; line detection is fragile |
+| **Hardcoded DIGIT_GRID** | User provided the exact 7×20 digit sequence; avoids fragile auto-detection |
+| **Right-click undo** | Allows fixing misclicks without restarting |
+| **Equal 7×20 grid division** | WAIS forms have uniform grid; line detection is fragile |
 | **Single popup** (not 9 separate) | User requested "1 pic" with 9 rows |
 | **Border margins in symbol crop** (38–92 %) | Avoids digit contamination of symbol region |
 
-### Matching Algorithm
+### Digit Grid (Row × Column)
 
 ```
-For each cell in 7×20 grid:
-  1. Extract top 35% → binarise (Otsu)
-  2. Skip if < 8 foreground pixels (no content)
-  3. Resize to 20×30 standard size
-  4. For each digit ref (1-9):
-     a. Binarise ref → resize to 20×30
-     b. Compute Foreground IoU = AND / OR
-     c. Compute Pixel Agreement = equal_pixels / total
-     d. Score = 0.6 × IoU + 0.4 × Agreement
-  5. Accept match if best score ≥ 0.28
+Row 1: 2 1 3 7 2 4 8 2 1 3 2 1 4 2 3 5 2 3 1 4
+Row 2: 5 6 3 1 4 1 5 4 2 7 6 3 5 7 2 8 5 4 6 3
+Row 3: 7 2 8 1 9 5 8 4 7 3 6 2 5 1 9 2 8 3 7 4
+Row 4: 6 5 9 4 8 3 7 2 6 1 5 4 6 3 7 9 2 8 1 7
+Row 5: 9 4 6 8 5 9 7 1 8 5 2 9 4 8 6 3 7 9 8 6
+Row 6: 2 7 3 6 5 1 9 8 4 5 7 3 1 4 8 7 9 1 4 5
+Row 7: 7 1 8 2 9 3 6 7 2 8 5 2 3 1 4 8 4 2 7 6
 ```
 
 ---
@@ -111,10 +108,13 @@ For each cell in 7×20 grid:
 # Run with a completed WAIS form photo
 python wais_digit_grouping.py /path/to/input.jpg
 
+# Or double-click (no args) to get a file dialog
+python wais_digit_grouping.py
+
 # Workflow:
-# 1. Click 4 corners of the grid in the popup (TL→TR→BR→BL)
-# 2. Script perspective-corrects and processes
-# 3. Review popup shows entries grouped by digit (1 row per digit)
+# 1. Left-click 4 grid corners (TL→TR→BR→BL), right-click to undo
+# 2. Script perspective-corrects and extracts symbol regions
+# 3. Review popup shows entries grouped by digit (9 rows)
 # 4. Press Q, Enter, or close window to quit
 ```
 
@@ -130,12 +130,10 @@ pip install opencv-python numpy matplotlib
 
 | Area | Suggestion |
 |---|---|
-| **Digit matching** | If matching fails on real inputs, try contour‑based Hu moments or install Tesseract OCR |
 | **Symbol clarity** | Invert symbol ROI (white bg → black ink) for better visibility in review |
 | **Review interactivity** | Add click‑to‑mark (correct/incorrect) and save results to CSV |
 | **Grid alignment** | If equal division is off, detect row/column lines from the warped image |
 | **Batch processing** | Add `--output` flag to save review image instead of displaying |
-| **Template fallback** | If template.jpg is missing, extract key boxes from the input image directly |
 
 ---
 
