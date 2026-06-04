@@ -140,7 +140,8 @@ def select_four_corners(img: np.ndarray, filename: str
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     h_img, w_img = img.shape[:2]
 
-    fig, ax = plt.subplots(figsize=(12, 16))
+    with plt.rc_context({'toolbar': 'None'}):
+        fig, ax = plt.subplots(figsize=(12, 16))
     ax.imshow(img_rgb)
     ax.axis("on")
 
@@ -513,15 +514,8 @@ def show_review_popup(results: dict[int, list[np.ndarray]],
     canvas, rects, _digits, _indices = _build_review_canvas(results, filename)
     n_cells = len(rects)
 
-    fig, ax = plt.subplots(figsize=(14, 9.5))
-    # Hide the navigation toolbar (the extra popup-like bar)
-    try:
-        fig.canvas.toolbar_visible = False
-    except AttributeError:
-        try:
-            fig.canvas.toolbar.visible = False
-        except AttributeError:
-            pass
+    with plt.rc_context({'toolbar': 'None'}):
+        fig, ax = plt.subplots(figsize=(14, 9.5))
 
     ax.imshow(canvas, cmap="gray", vmin=0, vmax=255,
               interpolation="nearest")
@@ -819,15 +813,8 @@ def show_menu() -> int:
     Press 1/2 or click the button.  Q/Esc/X → quit.
     Returns the choice (1 or 2).
     """
-    fig, ax = plt.subplots(figsize=(5, 3.2))
-    # Hide toolbar
-    try:
-        fig.canvas.toolbar_visible = False
-    except AttributeError:
-        try:
-            fig.canvas.toolbar.visible = False
-        except AttributeError:
-            pass
+    with plt.rc_context({'toolbar': 'None'}):
+        fig, ax = plt.subplots(figsize=(5, 3.2))
 
     ax.set_xlim(0, 5)
     ax.set_ylim(0, 3.2)
@@ -883,7 +870,6 @@ def show_menu() -> int:
     fig.canvas.mpl_connect("key_press_event", on_key)
     fig.canvas.mpl_connect("close_event", on_close)
 
-    plt.tight_layout()
     plt.show()
 
     if not choice:
