@@ -34,7 +34,8 @@ f10e5f2 (HEAD -> main, origin/main) Add images + .gitignore
 
 | File | Size | Description |
 |---|---|---|
-| `wais_digit_grouping.py` | ~15 KB | Main Python script |
+| `wais_digit_grouping.py` | ~19 KB | **Smart** version — pen-mark removal + multi-channel edge fusion for grid detection |
+| `wais_digit_grouping_simple.py` | ~15 KB | **Simple** version — equal-division only (the original stable one) |
 | `template.jpg` | 229 KB | Blank WAIS form (grid only, no entries) |
 | `sample.jpg` | 193 KB | Completed WAIS form (with participant entries) |
 | `README.md` | 0 B | Empty |
@@ -43,29 +44,42 @@ f10e5f2 (HEAD -> main, origin/main) Add images + .gitignore
 
 ---
 
-## 3. Script Architecture — `wais_digit_grouping.py`
+## 3. Script Architecture
+
+### `wais_digit_grouping_simple.py` (equal-division)
 
 ```
-wais_digit_grouping.py
-├── Phase 1: Load image + user clicks 4 grid corners (matplotlib)
-│             Left-click = add corner, Right-click = undo last
-├── Phase 2: Perspective correction of the grid region
-├── Phase 3: Divide grid → 7×20 equal cell_groups
-│     For each cell_group: read known digit from DIGIT_GRID (hardcoded)
-│     Extract symbol region from lower 38–92% of cell_group
-└── Phase 4: Single popup with filename + 9 rows (one per digit)
-    └── Q / Enter / close → quit
+Phase 1: Load image + user clicks 4 grid corners
+Phase 2: Perspective correction
+Phase 3: Equal 7×20 division → symbol extraction
+Phase 4: Grouped review popup (Q/Enter/close → quit)
+```
+
+### `wais_digit_grouping.py` (smart grid detection)
+
+```
+Phase 1: Load image + user clicks 4 grid corners
+Phase 2: Perspective correction
+Phase 3: Smart grid detection + symbol extraction
+  ├── _remove_pen_marks() — inpaint over coloured & thick pen strokes
+  ├── _min_channel_edge() — multi-channel edge fusion
+  ├── _detect_grid_clever() — morphology + projection peak-finding
+  ├── _smart_peaks() — adaptive thresholding with scoring
+  └── _refine_peaks() — local edge snapping
+Phase 4: Grouped review popup (Q/Enter/close → quit)
 ```
 
 ### Key Design Decisions
 
 | Decision | Rationale |
 |---|---|
+| **Two scripts** | Smart version handles pen-over-line cases; simple version is always-stable fallback |
 | **Hardcoded DIGIT_GRID** | User provided the exact 7×20 digit sequence; avoids fragile auto-detection |
 | **Right-click undo** | Allows fixing misclicks without restarting |
-| **Equal 7×20 grid division** | WAIS forms have uniform grid; line detection is fragile |
-| **Single popup** (not 9 separate) | User requested "1 pic" with 9 rows |
-| **Border margins in symbol crop** (38–92 %) | Avoids digit contamination of symbol region |
+| **Pen inpainting (smart)** | HSV color masking for coloured pens; thickness filtering for black pens |
+| **Multi-channel edge fusion (smart)** | Min across BGR channels suppresses coloured pen edges while preserving black printed lines |
+| **Adaptive peak scoring** | Scores peaks by height × isolation; pads/trims to exactly 8×21 boundaries |
+| **Equal division fallback** | Always safe — used when smart detection is unreliable |
 
 ### Digit Grid (Row × Column)
 
